@@ -281,10 +281,7 @@ impl FromStr for AircraftFlags {
 
         // at least one entry has flags of 0b10000. @wiedehopf doesn't know what it
         // means, so we just ignore unknown bits :shrug:
-        //Ok(AircraftFlags::from_bits_retain(bits))
-
-        // this is what fails with unknown bits
-        AircraftFlags::from_bits(bits).ok_or_else(err)
+        Ok(AircraftFlags::from_bits_retain(bits))
     }
 }
 

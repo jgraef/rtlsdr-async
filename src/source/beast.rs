@@ -16,10 +16,7 @@ use std::{
     },
 };
 
-use bytes::{
-    Bytes,
-    BytesMut,
-};
+use bytes::Buf;
 use pin_project_lite::pin_project;
 use tokio::io::{
     AsyncRead,
@@ -42,8 +39,8 @@ pin_project! {
     pub struct BeastReader<R> {
         #[pin]
         reader: R,
-        state: State,
-        //payload_buffer: BytesMut,
+        receive_buffer: ReceiveBuffer,
+        decoder: PacketDecoder,
     }
 }
 
@@ -51,7 +48,8 @@ impl<R> BeastReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
             reader,
-            state: Default::default(), //payload_buffer: BytesMut::new(),
+            receive_buffer: Default::default(),
+            decoder: Default::default(),
         }
     }
 }
@@ -62,118 +60,266 @@ impl<R: AsyncRead> BeastReader<R> {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Option<Packet>, Error>> {
         loop {
-            let this = self.as_mut().project();
-            let state = this.state;
+            let mut this = self.as_mut().project();
 
-            assert!(state.receive_buffer_read_pos <= state.receive_buffer_write_pos);
-
-            // we got an EOF while reading earlier
-            if state.eof_reached {
-                return Poll::Ready(Ok(None));
-            }
-
-            // first consume all bytes we already received from the underlying reader
-            while let Some(byte) = state.next_received_byte() {
-                if state.packet_escape_read {
-                    // we already read the packet escape
-
-                    if let Some(packet_type) = state.packet_type {
-                        // we already read the packet type
-
-                        while let Some(byte) = state.next_received_byte() {}
-                    }
-                    else {
-                        // we didn't read the packet type yet, so this byte is it.
-                        state.set_packet_type(byte);
-                    }
-                }
-                else if byte == ESCAPE {
-                    // we didn't receive a packet escape yet, but the current byte is one.
-                    state.new_packet();
-                }
-                else {
-                    // we didn't receive a packet escape yet, and the current byte isn't one. this
-                    // is a protocol error.
-                    todo!("garbage");
+            if this.receive_buffer.has_data() {
+                if let Some(packet) = this.decoder.decode_next(&mut this.receive_buffer)? {
+                    return Poll::Ready(Ok(Some(packet)));
                 }
             }
+            else {
+                // if there is no data in the receiver buffer, we need to receive some
+                this.receive_buffer.reset();
 
-            let mut read_buf = ReadBuf::new(&mut state.receive_buffer);
-            match this.reader.poll_read(cx, &mut read_buf) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Ready(Ok(())) => {
-                    let n_read = read_buf.filled().len();
-                    if n_read == 0 {
-                        state.eof_reached = true;
-                        continue;
+                let mut read_buf = ReadBuf::new(&mut this.receive_buffer.buffer);
+                match this.reader.poll_read(cx, &mut read_buf) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(())) => {
+                        let num_bytes_read = read_buf.filled().len();
+
+                        // if no data was received, the underlying reader reached EOF
+                        if num_bytes_read == 0 {
+                            return Poll::Ready(Ok(None));
+                        }
+
+                        this.receive_buffer.num_bytes = num_bytes_read;
                     }
-                    state.receive_buffer_write_pos = n_read;
                 }
             }
         }
-
-        todo!()
     }
 }
 
 #[derive(Debug)]
-struct State {
-    eof_reached: bool,
-    receive_buffer: [u8; RECEIVE_BUFFER_SIZE],
-    receive_buffer_read_pos: usize,
-    receive_buffer_write_pos: usize,
-    packet_escape_read: bool,
-    packet_type: Option<u8>,
-    packet_buffer: [u8; PACKET_BUFFER_SIZE],
-    packet_buffer_write_pos: usize,
-    packet_expected_length: Option<usize>,
+struct ReceiveBuffer {
+    buffer: [u8; RECEIVE_BUFFER_SIZE],
+    read_pos: usize,
+    num_bytes: usize,
 }
 
-impl State {
+impl Default for ReceiveBuffer {
+    fn default() -> Self {
+        Self {
+            buffer: [0; RECEIVE_BUFFER_SIZE],
+            read_pos: 0,
+            num_bytes: 0,
+        }
+    }
+}
+
+impl ReceiveBuffer {
     #[inline(always)]
-    fn next_received_byte(&mut self) -> Option<u8> {
-        if self.receive_buffer_read_pos < self.receive_buffer_write_pos {
-            let byte = self.receive_buffer[self.receive_buffer_read_pos];
-            self.receive_buffer_read_pos += 1;
-            Some(byte)
+    fn has_data(&self) -> bool {
+        self.read_pos < self.num_bytes
+    }
+
+    #[inline(always)]
+    fn reset(&mut self) {
+        self.read_pos = 0;
+        self.num_bytes = 0;
+    }
+
+    #[inline(always)]
+    fn next_byte(&mut self) -> Option<u8> {
+        self.has_data().then(|| {
+            let byte = self.buffer[self.read_pos];
+            self.read_pos += 1;
+            byte
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PacketDecoder {
+    leading_escape_read: bool,
+    tag: Option<u8>,
+    is_known_tag: bool,
+    buffer: [u8; PACKET_BUFFER_SIZE],
+    buffer_write_pos: usize,
+    expected_length: Option<usize>,
+    read_incomplete_escape: bool,
+}
+
+impl PacketDecoder {
+    /// Reads from the receiver_buffer as much as needed to decode one packet.
+    /// if there isn't enough data in the buffer, returns None.
+    ///
+    /// This will read as much as possible. So if None is returned all data has
+    /// been read and the receive_buffer can be cleared.
+    ///
+    /// The decoder keeps track of any partially decoded packets and the next
+    /// invokation of this method will resume decoding.
+    fn decode_next(&mut self, receive_buffer: &mut ReceiveBuffer) -> Result<Option<Packet>, Error> {
+        while let Some(byte) = receive_buffer.next_byte() {
+            if self.leading_escape_read {
+                // we already read the packet escape
+
+                if self.tag.is_some() {
+                    // we already read the packet type
+
+                    let mut emit_packet = false;
+                    if self.read_incomplete_escape {
+                        // we read an escape before, but we don't know what follows yet.
+                        if byte == ESCAPE {
+                            // double escape
+                            self.push_byte(ESCAPE);
+                            self.read_incomplete_escape = false;
+                        }
+                        else {
+                            // the escape we read was the start of a new packet
+                            self.leading_escape_read = true;
+                            self.set_packet_type(byte);
+                            emit_packet = true;
+                        }
+                    }
+                    else {
+                        // payload byte
+                        self.push_byte(byte);
+                    }
+
+                    if let Some(expected_length) = self.expected_length {
+                        if self.buffer_write_pos == expected_length {
+                            emit_packet = true;
+                        }
+                    }
+
+                    if emit_packet {
+                        if let Some(packet) = self.emit_packet()? {
+                            return Ok(Some(packet));
+                        }
+                    }
+                }
+                else {
+                    // if we read an escape here something is messed up
+                    if byte == ESCAPE {
+                        todo!("error");
+                    }
+
+                    // we didn't read the packet type yet, so this byte is it.
+                    self.set_packet_type(byte);
+                }
+            }
+            else if byte == ESCAPE {
+                // we didn't receive a packet escape yet, but the current byte is one.
+                self.new_packet();
+            }
+            else {
+                // we didn't receive a packet escape yet, and the current byte isn't one.
+                // this is a protocol error.
+                todo!("garbage");
+            }
         }
-        else {
-            None
-        }
+
+        Ok(None)
     }
 
     #[inline(always)]
     fn new_packet(&mut self) {
-        self.packet_escape_read = true;
-        self.packet_type = None;
-        self.packet_buffer_write_pos = 0;
+        self.leading_escape_read = true;
+        self.tag = None;
+        self.buffer_write_pos = 0;
     }
 
     #[inline(always)]
-    fn set_packet_type(&mut self, ty: u8) {
-        self.packet_type = Some(ty);
-        self.packet_expected_length = match ty {
-            b'1' => Some(9),
-            b'2' => Some(14),
-            b'3' => Some(21),
-            _ => None,
-        };
+    fn set_packet_type(&mut self, tag: u8) {
+        self.tag = Some(tag);
+        match tag {
+            b'1' => {
+                self.expected_length = Some(9);
+                self.is_known_tag = true;
+            }
+            b'2' => {
+                self.expected_length = Some(14);
+                self.is_known_tag = true;
+            }
+            b'3' => {
+                self.expected_length = Some(21);
+                self.is_known_tag = true;
+            }
+            _ => {}
+        }
+    }
+
+    #[inline(always)]
+    fn push_byte(&mut self, byte: u8) {
+        if self.is_known_tag {
+            self.buffer[self.buffer_write_pos] = byte;
+            self.buffer_write_pos += 1;
+        }
+    }
+
+    #[inline(always)]
+    fn emit_packet(&mut self) -> Result<Option<Packet>, Error> {
+        assert!(!self.read_incomplete_escape);
+        assert!(self.leading_escape_read);
+
+        let tag = self.tag.expect("emitting packet without having read a tag");
+
+        if self.is_known_tag {
+            if let Some(expected_length) = self.expected_length {
+                if self.buffer_write_pos != expected_length {
+                    todo!("error, invalid length");
+                }
+            }
+
+            fn read_bytes<B: Buf, const N: usize>(buffer: &mut B) -> [u8; N] {
+                let mut data: [u8; N] = [0; N];
+                buffer.copy_to_slice(&mut data[..]);
+                data
+            }
+
+            let mut buffer = &self.buffer[..self.buffer_write_pos];
+            let packet = match tag {
+                b'1' => {
+                    Packet::ModeAc {
+                        timestamp: read_bytes(&mut buffer),
+                        signal_level: buffer.get_u8(),
+                        data: read_bytes(&mut buffer),
+                    }
+                }
+                b'2' => {
+                    Packet::ModeSShort {
+                        timestamp: read_bytes(&mut buffer),
+                        signal_level: buffer.get_u8(),
+                        data: read_bytes(&mut buffer),
+                    }
+                }
+                b'3' => {
+                    Packet::ModeSLong {
+                        timestamp: read_bytes(&mut buffer),
+                        signal_level: buffer.get_u8(),
+                        data: read_bytes(&mut buffer),
+                    }
+                }
+                _ => unreachable!("is_known_tag is set, but tag was not matched"),
+            };
+
+            // reset decoder state
+            self.leading_escape_read = false;
+            self.tag = None;
+            self.is_known_tag = false;
+            self.buffer_write_pos = 0;
+            self.expected_length = None;
+
+            Ok(Some(packet))
+        }
+        else {
+            Ok(None)
+        }
     }
 }
 
-impl Default for State {
+impl Default for PacketDecoder {
     fn default() -> Self {
         Self {
-            eof_reached: false,
-            receive_buffer: [0; RECEIVE_BUFFER_SIZE],
-            receive_buffer_read_pos: 0,
-            receive_buffer_write_pos: 0,
-            packet_escape_read: false,
-            packet_type: None,
-            packet_buffer: [0; PACKET_BUFFER_SIZE],
-            packet_buffer_write_pos: 0,
-            packet_expected_length: None,
+            leading_escape_read: false,
+            tag: None,
+            is_known_tag: false,
+            buffer: [0; PACKET_BUFFER_SIZE],
+            buffer_write_pos: 0,
+            expected_length: None,
+            read_incomplete_escape: false,
         }
     }
 }
@@ -183,6 +329,17 @@ pub enum Packet {
     ModeAc {
         timestamp: MlatTimestamp,
         signal_level: SignalLevel,
+        data: [u8; 2],
+    },
+    ModeSShort {
+        timestamp: MlatTimestamp,
+        signal_level: SignalLevel,
+        data: [u8; 7],
+    },
+    ModeSLong {
+        timestamp: MlatTimestamp,
+        signal_level: SignalLevel,
+        data: [u8; 14],
     },
 }
 

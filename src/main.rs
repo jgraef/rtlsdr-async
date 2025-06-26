@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub mod app;
+pub mod api;
 pub mod country;
 pub mod database;
 pub mod source;
