@@ -24,14 +24,14 @@ pub struct TreeWriter<W> {
 }
 
 impl<W: Write + Seek> TreeWriter<W> {
-    pub fn write_tree(&mut self, tree: &Tree) -> Result<(), Error> {
+    pub fn write_tree(&mut self, _tree: &Tree) -> Result<(), Error> {
         todo!();
     }
 
     pub fn write_tree_with_metdata<M: Serialize>(
         &mut self,
-        tree: &Tree,
-        metadata: &M,
+        _tree: &Tree,
+        _metadata: &M,
     ) -> Result<(), Error> {
         todo!();
     }

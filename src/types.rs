@@ -6,6 +6,11 @@ use std::{
     str::FromStr,
 };
 
+use serde::{
+    Deserialize,
+    Serialize,
+};
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IcaoAddress {
     address: u32,
@@ -218,5 +223,121 @@ where
     ) -> Result<Self, sqlx::error::BoxDynError> {
         let code = <i16 as sqlx::Decode<DB>>::decode(value)?;
         Ok(Self::from_u16_unchecked(code as u16))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Wtc {
+    #[serde(rename = "L")]
+    Light,
+    #[serde(rename = "M")]
+    Medium,
+    #[serde(rename = "H")]
+    Heavy,
+    #[serde(rename = "J")]
+    Super,
+}
+
+impl Wtc {
+    pub fn as_char(&self) -> char {
+        match self {
+            Wtc::Light => 'L',
+            Wtc::Medium => 'M',
+            Wtc::Heavy => 'H',
+            Wtc::Super => 'J',
+        }
+    }
+
+    pub fn from_char(c: char) -> Option<Self> {
+        match c {
+            'L' | 'l' => Some(Self::Light),
+            'M' | 'm' => Some(Self::Medium),
+            'H' | 'h' => Some(Self::Heavy),
+            'J' | 'j' => Some(Self::Super),
+            _ => None,
+        }
+    }
+}
+
+impl Display for Wtc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_char())
+    }
+}
+
+impl Debug for Wtc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Wtc({})", self.as_char())
+    }
+}
+
+impl FromStr for Wtc {
+    type Err = WtcFromStrError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = || {
+            WtcFromStrError {
+                input: s.to_owned(),
+            }
+        };
+        let mut chars = s.chars();
+        let c = chars.next().ok_or_else(err)?;
+        if chars.next().is_some() {
+            return Err(err());
+        }
+        Self::from_char(c).ok_or_else(err)
+    }
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("Invalid WTC: {input}")]
+pub struct WtcFromStrError {
+    pub input: String,
+}
+
+impl From<Wtc> for char {
+    fn from(value: Wtc) -> Self {
+        value.as_char()
+    }
+}
+
+impl TryFrom<char> for Wtc {
+    type Error = ();
+
+    fn try_from(value: char) -> Result<Self, Self::Error> {
+        Self::from_char(value).ok_or(())
+    }
+}
+
+impl<DB: sqlx::Database> sqlx::Type<DB> for Wtc
+where
+    i8: sqlx::Type<DB>,
+{
+    fn type_info() -> DB::TypeInfo {
+        <i8 as sqlx::Type<DB>>::type_info()
+    }
+}
+
+impl<'q, DB: sqlx::Database> sqlx::Encode<'q, DB> for Wtc
+where
+    i8: sqlx::Encode<'q, DB>,
+{
+    fn encode_by_ref(
+        &self,
+        buf: &mut <DB as sqlx::Database>::ArgumentBuffer<'q>,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        <i8 as sqlx::Encode<DB>>::encode_by_ref(&(self.as_char() as i8), buf)
+    }
+}
+
+impl<'r, DB: sqlx::Database> sqlx::Decode<'r, DB> for Wtc
+where
+    i8: sqlx::Decode<'r, DB>,
+{
+    fn decode(
+        value: <DB as sqlx::Database>::ValueRef<'r>,
+    ) -> Result<Self, sqlx::error::BoxDynError> {
+        let c = <i8 as sqlx::Decode<DB>>::decode(value)?;
+        Ok(Self::from_char(c as u8 as char).unwrap_or_else(|| panic!("invalid wtc: {c}")))
     }
 }

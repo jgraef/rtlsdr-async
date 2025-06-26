@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod app;
+pub mod country;
 pub mod database;
 pub mod source;
 pub mod spatial;
@@ -18,8 +19,8 @@ use color_eyre::eyre::Error;
 use crate::{
     database::Database,
     source::{
-        aircraft::{fetch_aircraft_db, update_aircraft_db},
         history::index_archive_day_from_directory,
+        tar1090_db::update_aircraft_db,
     },
 };
 
@@ -51,11 +52,8 @@ async fn main() -> Result<(), Error> {
         Command::IndexArchiveDay { directory, options } => {
             index_archive_day_from_directory(&database, &options, &directory).await?;
         }
-        Command::FetchAircraftDb => {
-            fetch_aircraft_db().await?;
-        }
-        Command::UpdateAircraftDb => {
-            update_aircraft_db(&database).await?;
+        Command::UpdateAircraftDb { file } => {
+            update_aircraft_db(&database, file.as_deref()).await?;
         }
     }
 
@@ -79,8 +77,10 @@ pub enum Command {
         #[clap(flatten)]
         options: IndexOptions,
     },
-    FetchAircraftDb,
-    UpdateAircraftDb,
+    UpdateAircraftDb {
+        #[clap(short, long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, clap::Args)]

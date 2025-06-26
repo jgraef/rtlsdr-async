@@ -76,7 +76,7 @@ impl Tree {
         self.root.insert(address, position, self.depth.get());
     }
 
-    pub fn get(&self, p1: [f32; 2], p2: [f32; 2]) -> TreeIter<'_> {
+    pub fn get(&self, _p1: [f32; 2], _p2: [f32; 2]) -> TreeIter<'_> {
         todo!();
     }
 }

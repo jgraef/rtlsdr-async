@@ -31,13 +31,16 @@ create index index_aircraft_registration_registration on aircraft_registration (
 
 create table aircraft_model (
     icao_code text not null primary key,
-    name text
+    name text,
+    description text,
+    wtc char
 );
 
 
 create table aircraft_tag (
     icao_address int not null,
-    tag text not null
+    tag text not null,
+    unique (icao_address, tag)
 );
 
 create index index_aircraft_tag_icao_address on aircraft_tag (icao_address);
