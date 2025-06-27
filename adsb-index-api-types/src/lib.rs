@@ -1,3 +1,8 @@
+pub mod flights;
+pub mod live;
+#[cfg(feature = "sqlx")]
+mod sqlx;
+
 use std::{
     fmt::{
         Debug,
@@ -10,8 +15,14 @@ use serde::{
     Deserialize,
     Serialize,
 };
+use serde_with::{
+    DeserializeFromStr,
+    SerializeDisplay,
+};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, SerializeDisplay, DeserializeFromStr,
+)]
 pub struct IcaoAddress {
     address: u32,
     non_icao: bool, // todo: how should this be handled correctly?
@@ -96,55 +107,18 @@ impl From<IcaoAddress> for u32 {
     }
 }
 
-impl<DB: sqlx::Database> sqlx::Type<DB> for IcaoAddress
-where
-    i32: sqlx::Type<DB>,
-{
-    fn type_info() -> DB::TypeInfo {
-        <i32 as sqlx::Type<DB>>::type_info()
-    }
-}
-
-impl<'q, DB: sqlx::Database> sqlx::Encode<'q, DB> for IcaoAddress
-where
-    i32: sqlx::Encode<'q, DB>,
-{
-    fn encode_by_ref(
-        &self,
-        buf: &mut <DB as sqlx::Database>::ArgumentBuffer<'q>,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        let mut address = self.address as i32;
-        if self.non_icao {
-            address = -address;
-        }
-        <i32 as sqlx::Encode<DB>>::encode_by_ref(&(address as i32), buf)
-    }
-}
-
-impl<'r, DB: sqlx::Database> sqlx::Decode<'r, DB> for IcaoAddress
-where
-    i32: sqlx::Decode<'r, DB>,
-{
-    fn decode(
-        value: <DB as sqlx::Database>::ValueRef<'r>,
-    ) -> Result<Self, sqlx::error::BoxDynError> {
-        let address = <i32 as sqlx::Decode<DB>>::decode(value)?;
-        let non_icao = address < 0;
-        let address = address.abs() as u32;
-        Ok(Self { address, non_icao })
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, SerializeDisplay, DeserializeFromStr,
+)]
 pub struct Squawk {
     code: u16,
 }
 
 impl Squawk {
-    const VFR_STANDARD: Self = Self::from_u16_unchecked(0700);
-    const AIRCRAFT_HIJACKING: Self = Self::from_u16_unchecked(07500);
-    const RADIO_FAILURE: Self = Self::from_u16_unchecked(07600);
-    const EMERGENCY: Self = Self::from_u16_unchecked(07700);
+    pub const VFR_STANDARD: Self = Self::from_u16_unchecked(0700);
+    pub const AIRCRAFT_HIJACKING: Self = Self::from_u16_unchecked(07500);
+    pub const RADIO_FAILURE: Self = Self::from_u16_unchecked(07600);
+    pub const EMERGENCY: Self = Self::from_u16_unchecked(07700);
 
     pub const fn from_u16_unchecked(code: u16) -> Self {
         Self { code }
@@ -190,39 +164,6 @@ pub struct SquawkFromStrError {
 impl From<Squawk> for u16 {
     fn from(value: Squawk) -> Self {
         value.code
-    }
-}
-
-impl<DB: sqlx::Database> sqlx::Type<DB> for Squawk
-where
-    i16: sqlx::Type<DB>,
-{
-    fn type_info() -> DB::TypeInfo {
-        <i16 as sqlx::Type<DB>>::type_info()
-    }
-}
-
-impl<'q, DB: sqlx::Database> sqlx::Encode<'q, DB> for Squawk
-where
-    i16: sqlx::Encode<'q, DB>,
-{
-    fn encode_by_ref(
-        &self,
-        buf: &mut <DB as sqlx::Database>::ArgumentBuffer<'q>,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <i16 as sqlx::Encode<DB>>::encode_by_ref(&(self.code as i16), buf)
-    }
-}
-
-impl<'r, DB: sqlx::Database> sqlx::Decode<'r, DB> for Squawk
-where
-    i16: sqlx::Decode<'r, DB>,
-{
-    fn decode(
-        value: <DB as sqlx::Database>::ValueRef<'r>,
-    ) -> Result<Self, sqlx::error::BoxDynError> {
-        let code = <i16 as sqlx::Decode<DB>>::decode(value)?;
-        Ok(Self::from_u16_unchecked(code as u16))
     }
 }
 
@@ -309,35 +250,10 @@ impl TryFrom<char> for Wtc {
     }
 }
 
-impl<DB: sqlx::Database> sqlx::Type<DB> for Wtc
-where
-    i8: sqlx::Type<DB>,
-{
-    fn type_info() -> DB::TypeInfo {
-        <i8 as sqlx::Type<DB>>::type_info()
-    }
-}
-
-impl<'q, DB: sqlx::Database> sqlx::Encode<'q, DB> for Wtc
-where
-    i8: sqlx::Encode<'q, DB>,
-{
-    fn encode_by_ref(
-        &self,
-        buf: &mut <DB as sqlx::Database>::ArgumentBuffer<'q>,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-        <i8 as sqlx::Encode<DB>>::encode_by_ref(&(self.as_char() as i8), buf)
-    }
-}
-
-impl<'r, DB: sqlx::Database> sqlx::Decode<'r, DB> for Wtc
-where
-    i8: sqlx::Decode<'r, DB>,
-{
-    fn decode(
-        value: <DB as sqlx::Database>::ValueRef<'r>,
-    ) -> Result<Self, sqlx::error::BoxDynError> {
-        let c = <i8 as sqlx::Decode<DB>>::decode(value)?;
-        Ok(Self::from_char(c as u8 as char).unwrap_or_else(|| panic!("invalid wtc: {c}")))
-    }
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Bbox {
+    pub south_of: f32,
+    pub north_of: f32,
+    pub east_of: f32,
+    pub west_of: f32,
 }

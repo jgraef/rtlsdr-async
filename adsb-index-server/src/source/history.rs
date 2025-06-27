@@ -9,6 +9,10 @@ use std::{
     path::Path,
 };
 
+use adsb_index_api_types::{
+    IcaoAddress,
+    Squawk,
+};
 use chrono::{
     DateTime,
     Utc,
@@ -21,18 +25,12 @@ use serde::{
 
 use crate::{
     Error,
-    IndexOptions,
     database::Database,
-    types::{
-        IcaoAddress,
-        Squawk,
-    },
     util::json::json_decode,
 };
 
 pub async fn index_archive_day_from_directory(
     database: &Database,
-    options: &IndexOptions,
     path: impl AsRef<Path>,
 ) -> Result<(), Error> {
     let path = path.as_ref();
@@ -52,18 +50,14 @@ pub async fn index_archive_day_from_directory(
             reader.read_to_string(&mut json)?;
             let trace: TraceFile = json_decode(&json)?;
 
-            index_trace(&database, &options, &trace).await?;
+            index_trace(&database, &trace).await?;
         }
     }
 
     Ok(())
 }
 
-pub async fn index_trace(
-    database: &Database,
-    options: &IndexOptions,
-    trace: &TraceFile,
-) -> Result<(), Error> {
+pub async fn index_trace(database: &Database, trace: &TraceFile) -> Result<(), Error> {
     let icao_address = trace.icao.parse::<IcaoAddress>()?;
 
     let mut current_callsign = None;
@@ -99,7 +93,7 @@ pub async fn index_trace(
             }
         }
 
-        if (is_first || is_last || callsign_changed || squawk_changed) && options.flight_info {
+        if is_first || is_last || callsign_changed || squawk_changed {
             tracing::debug!(icao = %icao_address, %time, callsign = ?current_callsign, squawk = ?current_squawk);
 
             sqlx::query_unchecked!(

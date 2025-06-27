@@ -10,9 +10,12 @@ use std::{
     time::Instant,
 };
 
+use adsb_index_api_types::{
+    IcaoAddress,
+    Wtc,
+};
 use bitflags::bitflags;
 use bytes::Buf;
-use color_eyre::eyre::eyre;
 use humantime::format_duration;
 use libflate::gzip;
 use serde::Deserialize;
@@ -22,10 +25,6 @@ use crate::{
     database::{
         Database,
         Transaction,
-    },
-    types::{
-        IcaoAddress,
-        Wtc,
     },
     util::http_client,
 };
@@ -76,10 +75,7 @@ async fn get_latest_aircraft_db_commit() -> Result<String, Error> {
         .json()
         .await?;
 
-    Ok(branch
-        .commit
-        .ok_or_else(|| eyre!("tar1090-db/csv has no commits"))?
-        .sha)
+    Ok(branch.commit.ok_or_else(|| Error::Tar1090NoCommits)?.sha)
 }
 
 pub async fn update_aircraft_db(database: &Database, file: Option<&Path>) -> Result<(), Error> {
@@ -260,24 +256,13 @@ impl FromStr for AircraftFlags {
     type Err = AircraftFlagsFromStrError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let err = || {
+        // the dbFlags are just a binary number string
+        // https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/aircraft.c#L851
+        let bits = u16::from_str_radix(s, 2).map_err(|_| {
             AircraftFlagsFromStrError {
                 input: s.to_owned(),
             }
-        };
-
-        let mut bits: u16 = 0;
-
-        // https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/aircraft.c#L851
-        for c in s.chars() {
-            bits <<= 1;
-            if c == '1' {
-                bits |= 1;
-            }
-            else if c != '0' {
-                return Err(err());
-            }
-        }
+        })?;
 
         // at least one entry has flags of 0b10000. @wiedehopf doesn't know what it
         // means, so we just ignore unknown bits :shrug:

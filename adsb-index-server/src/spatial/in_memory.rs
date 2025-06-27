@@ -3,7 +3,7 @@ use std::{
     num::NonZeroUsize,
 };
 
-use crate::types::IcaoAddress;
+use adsb_index_api_types::IcaoAddress;
 
 #[derive(Clone, Debug)]
 pub(super) struct Node {
