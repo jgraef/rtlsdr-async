@@ -1,6 +1,8 @@
 pub mod flights;
 pub mod live;
 
+use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex, RwLock};
+
 use axum::{
     Json,
     Router,
@@ -18,19 +20,23 @@ use tokio::net::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::database::Database;
+use crate::{broker::Broker, database::Database};
 
 #[derive(Clone, Debug)]
 pub struct Api {
     pub database: Database,
+    pub broker: Broker,
     pub shutdown: CancellationToken,
+    next_client_id: Arc<AtomicUsize>,
 }
 
 impl Api {
-    pub fn new(database: Database) -> Self {
+    pub fn new(database: Database, broker: Broker) -> Self {
         Self {
             database,
+            broker,
             shutdown: CancellationToken::new(),
+            next_client_id: Arc::new(AtomicUsize::new(1)),
         }
     }
 
@@ -58,6 +64,10 @@ impl Api {
             .await?;
 
         Ok(())
+    }
+
+    pub fn next_client_id(&self) -> usize {
+        self.next_client_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 

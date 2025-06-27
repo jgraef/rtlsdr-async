@@ -1,7 +1,6 @@
 use adsb_index_api_types::live::{
     ClientToServerMessage,
     ServerToClientMessage,
-    SubscriptionEvent,
 };
 use axum::{
     extract::{
@@ -14,14 +13,15 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{
-    Deserialize,
     Serialize,
     de::DeserializeOwned,
 };
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
-use crate::api::Api;
+use crate::{
+    api::Api,
+    broker::SubscriptionMessage,
+};
 
 pub async fn get_live(State(api): State<Api>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
     upgrade.on_upgrade(async move |websocket| {
@@ -31,6 +31,7 @@ pub async fn get_live(State(api): State<Api>, upgrade: WebSocketUpgrade) -> impl
 
 #[derive(Debug)]
 struct WebSocketHandler {
+    client_id: usize,
     api: Api,
     websocket: WebSocket,
     subscription_sender: mpsc::Sender<SubscriptionMessage>,
@@ -42,6 +43,7 @@ impl WebSocketHandler {
         let (subscription_sender, subscription_receiver) = mpsc::channel(128);
 
         Self {
+            client_id: api.next_client_id(),
             api,
             websocket: websocket.into(),
             subscription_sender,
@@ -53,7 +55,7 @@ impl WebSocketHandler {
         loop {
             tokio::select! {
                 _ = self.api.shutdown.cancelled() => {
-                    let _ = self.websocket.send_close(Some(CloseReason { code: CloseCode::GOING_AWAY, reason: Default::default() })).await;
+                    let _ = self.websocket.send_close(CloseReason { code: CloseCode::GOING_AWAY, reason: Default::default() }).await;
                     break;
                 }
                 message = self.websocket.receive::<ClientToServerMessage>() => {
@@ -89,11 +91,26 @@ impl WebSocketHandler {
         message: ClientToServerMessage,
     ) -> Result<(), Error> {
         match message {
-            ClientToServerMessage::Subscribe {
-                subscription_id,
-                filter,
-            } => todo!(),
-            ClientToServerMessage::Unsubcribe { subscription_id } => todo!(),
+            ClientToServerMessage::Subscribe { id, filter } => {
+                match self.api.broker.subscribe(self.client_id, id, filter, self.subscription_sender.clone()).await {
+                    Ok(()) => {
+                        self.websocket.send(ServerToClientMessage::Subscribed { id }).await?;
+                    }
+                    Err(error) => {
+                        self.websocket.send(ServerToClientMessage::Error { id: Some(id), message: Some(error.to_string()) }).await?;
+                    }
+                }
+            },
+            ClientToServerMessage::Unsubscribe { id } => {
+                match self.api.broker.unsubscribe(id).await {
+                    Ok(()) => {
+                        self.websocket.send(ServerToClientMessage::Unsubscribed { id }).await?;
+                    }
+                    Err(error) => {
+                        self.websocket.send(ServerToClientMessage::Error { id: Some(id), message: Some(error.to_string()) }).await?;
+                    }
+                }
+            },
         }
 
         Ok(())
@@ -105,7 +122,7 @@ impl WebSocketHandler {
     ) -> Result<(), Error> {
         self.websocket
             .send(&ServerToClientMessage::Subscription {
-                subscription_id: message.subscription_id,
+                id: message.id,
                 event: message.event,
                 dropped_count: message.dropped_count,
             })
@@ -113,13 +130,6 @@ impl WebSocketHandler {
 
         Ok(())
     }
-}
-
-#[derive(Debug)]
-pub struct SubscriptionMessage {
-    subscription_id: Uuid,
-    event: SubscriptionEvent,
-    dropped_count: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -130,15 +140,20 @@ pub enum Error {
 }
 
 impl Error {
-    fn as_close_reason(&self) -> Option<CloseReason> {
+    fn as_close_reason(&self) -> CloseReason {
         match self {
             Self::Json(error) => {
-                Some(CloseReason {
+                CloseReason {
                     code: CloseCode::PROTOCOL_ERROR,
                     reason: error.to_string(),
-                })
+                }
             }
-            _ => None,
+            _ => {
+                CloseReason {
+                    code: CloseCode::INTERNAL_ERROR,
+                    reason: "internal error".to_owned(),
+                }
+            },
         }
     }
 }
@@ -186,9 +201,9 @@ impl WebSocket {
         Ok(())
     }
 
-    async fn send_close(&mut self, reason: Option<CloseReason>) -> Result<(), Error> {
+    async fn send_close(&mut self, reason: CloseReason) -> Result<(), Error> {
         self.inner
-            .send(ws::Message::Close(reason.map(Into::into)))
+            .send(ws::Message::Close(Some(reason.into())))
             .await?;
         Ok(())
     }

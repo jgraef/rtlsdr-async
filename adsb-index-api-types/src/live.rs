@@ -13,28 +13,28 @@ use crate::{
 #[serde(rename_all = "kebab-case")]
 pub enum ClientToServerMessage {
     Subscribe {
-        subscription_id: Uuid,
+        id: Uuid,
         #[serde(flatten)]
         filter: SubscriptionFilter, // todo: filters
     },
-    Unsubcribe {
-        subscription_id: Uuid,
+    Unsubscribe {
+        id: Uuid,
     },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SubscriptionFilter {
-    aircraft: AircraftQuery,
+    pub aircraft: AircraftQuery,
 
     #[serde(default)]
-    area: Vec<Bbox>,
+    pub area: Vec<Bbox>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ServerToClientMessage {
     Subscription {
-        subscription_id: Uuid,
+        id: Uuid,
 
         #[serde(flatten)]
         event: SubscriptionEvent,
@@ -42,9 +42,11 @@ pub enum ServerToClientMessage {
         #[serde(skip_serializing_if = "is_zero")]
         dropped_count: usize,
     },
+    Subscribed { id: Uuid },
+    Unsubscribed { id: Uuid },
     Error {
-        subscription_id: Option<Uuid>,
-        // todo
+        id: Option<Uuid>,
+        message: Option<String>,
     },
 }
 

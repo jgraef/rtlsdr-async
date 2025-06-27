@@ -5,12 +5,10 @@ use adsb_index_api_types::{
     Squawk,
 };
 use adsb_index_server::{
-    api::Api,
-    database::Database,
-    source::{
+    api::Api, broker::Broker, database::Database, source::{
         history::index_archive_day_from_directory,
         tar1090_db::update_aircraft_db,
-    },
+    }
 };
 use clap::{
     Parser,
@@ -43,7 +41,8 @@ async fn main() -> Result<(), Error> {
             listen_address,
         } => {
             let database = Database::connect(&database_url).await?;
-            Api::new(database).serve(listen_address).await?;
+            let api = Api::new(database, Broker::new());
+            api.serve(listen_address).await?;
         }
         Command::Live {
             icao,
