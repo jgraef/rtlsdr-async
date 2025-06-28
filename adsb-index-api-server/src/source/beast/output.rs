@@ -304,12 +304,12 @@ impl PacketDecoder {
     /// been read and the receive_buffer can be cleared.
     ///
     /// The decoder keeps track of any partially decoded packets and the next
-    /// invokation of this method will resume decoding.
+    /// invocation of this method will resume decoding.
     fn decode_next(
         &mut self,
         receive_buffer: &mut ReceiveBuffer,
     ) -> Result<Option<OutputPacket>, Error> {
-        while let Some(byte) = receive_buffer.next_byte() {
+        while let Some(mut byte) = receive_buffer.next_byte() {
             if self.leading_escape_read {
                 // we already read the packet escape
 
@@ -318,12 +318,15 @@ impl PacketDecoder {
 
                     if self.read_incomplete_escape {
                         // we read an escape before, but we don't know what follows yet.
+                        // note: this whole block only handles the case that we read an escape at
+                        // the end of the buffer earlier.
+                        self.read_incomplete_escape = false;
+
                         if byte == ESCAPE {
                             // double escape
                             if packet_type.is_known() {
                                 self.push_byte(ESCAPE);
                             }
-                            self.read_incomplete_escape = false;
                         }
                         else {
                             // the escape we read was the start of a new packet
@@ -337,6 +340,18 @@ impl PacketDecoder {
                         }
                     }
                     else {
+                        if byte == ESCAPE {
+                            if let Some(next_byte) = receive_buffer.next_byte() {
+                                byte = next_byte;
+                            }
+                            else {
+                                // we read an escape, but the buffer is drained, so we need to
+                                // remember this
+                                self.read_incomplete_escape = true;
+                                break;
+                            }
+                        }
+
                         // payload byte
                         if packet_type.is_known() {
                             self.push_byte(byte);
@@ -354,13 +369,15 @@ impl PacketDecoder {
                     }
                 }
                 else {
-                    // if we read an escape here something is messed up
+                    // if we read an escape here, this is a double escape, meaning we're reading
+                    // garbage
                     if byte == ESCAPE {
-                        todo!("error");
+                        todo!("expected packet type, but read escape -> garbage");
                     }
 
                     // we didn't read the packet type yet, so this byte is it.
                     self.packet_type = Some(OutputPacketType::from_byte(byte));
+                    tracing::trace!(?self.packet_type);
                 }
             }
             else if byte == ESCAPE {
@@ -373,6 +390,7 @@ impl PacketDecoder {
                 // we didn't receive a packet escape yet, and the current byte isn't one.
                 // this is a protocol error.
                 todo!("garbage");
+                // todo: we might want to return a specific (recoverable) error
             }
         }
 
@@ -401,6 +419,7 @@ impl PacketDecoder {
             }
 
             let mut buffer = &self.buffer[..self.buffer_write_pos];
+            tracing::trace!(?buffer, len = buffer.len(), "decode packet");
             let packet = packet_type.decode(&mut buffer);
 
             // reset decoder state

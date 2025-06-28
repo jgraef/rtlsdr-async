@@ -29,23 +29,23 @@ use tokio::net::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    broker::Broker,
     database::Database,
+    tracker::Tracker,
 };
 
 #[derive(Clone, Debug)]
 pub struct Api {
     pub database: Database,
-    pub broker: Broker,
+    pub tracker: Tracker,
     pub shutdown: CancellationToken,
     next_client_id: Arc<AtomicUsize>,
 }
 
 impl Api {
-    pub fn new(database: Database, broker: Broker) -> Self {
+    pub fn new(database: Database, tracker: Tracker) -> Self {
         Self {
             database,
-            broker,
+            tracker,
             shutdown: CancellationToken::new(),
             next_client_id: Arc::new(AtomicUsize::new(1)),
         }

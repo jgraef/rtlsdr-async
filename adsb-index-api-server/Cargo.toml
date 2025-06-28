@@ -8,6 +8,7 @@ path = "../adsb-index-api-types"
 features = ["sqlx"]
 
 [dependencies]
+adsb_deku = { version = "0.8.0", features = ["serde"], git = "https://github.com/rsadsb/adsb_deku.git", branch = "update-deku-0-19-1" }
 axum = { version = "0.8.4", features = ["http2", "json", "ws"] }
 bitflags = "2.9.1"
 byteorder = "1.5.0"

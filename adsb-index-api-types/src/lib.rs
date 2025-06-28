@@ -2,6 +2,7 @@ pub mod flights;
 pub mod live;
 #[cfg(feature = "sqlx")]
 mod sqlx;
+pub(crate) mod util;
 
 use std::{
     fmt::{

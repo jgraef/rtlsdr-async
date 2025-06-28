@@ -37,6 +37,10 @@ impl ApiClient {
         Self { client, api_url }
     }
 
+    pub fn from_url(api_url: Url) -> Self {
+        Self::new(Default::default(), api_url)
+    }
+
     pub async fn live(&self) -> Result<Live, Error> {
         let websocket = self
             .client
@@ -62,9 +66,18 @@ impl Live {
         self.websocket.receive().await
     }
 
-    pub async fn subscribe(&mut self, id: Uuid, filter: SubscriptionFilter) -> Result<(), Error> {
+    pub async fn subscribe(
+        &mut self,
+        id: Uuid,
+        filter: SubscriptionFilter,
+        start_keyframe: bool,
+    ) -> Result<(), Error> {
         self.websocket
-            .send(ClientToServerMessage::Subscribe { id, filter })
+            .send(ClientToServerMessage::Subscribe {
+                id,
+                filter,
+                start_keyframe,
+            })
             .await?;
         Ok(())
     }

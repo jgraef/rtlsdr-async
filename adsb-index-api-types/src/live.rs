@@ -7,6 +7,10 @@ use uuid::Uuid;
 use crate::{
     Bbox,
     flights::AircraftQuery,
+    util::{
+        is_false,
+        is_zero,
+    },
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,7 +19,9 @@ pub enum ClientToServerMessage {
     Subscribe {
         id: Uuid,
         #[serde(flatten)]
-        filter: SubscriptionFilter, // todo: filters
+        filter: SubscriptionFilter,
+        #[serde(skip_serializing_if = "is_false")]
+        start_keyframe: bool,
     },
     Unsubscribe {
         id: Uuid,
@@ -39,7 +45,7 @@ pub enum ServerToClientMessage {
         #[serde(flatten)]
         event: SubscriptionEvent,
 
-        #[serde(skip_serializing_if = "is_zero")]
+        #[serde(default, skip_serializing_if = "is_zero")]
         dropped_count: usize,
     },
     Subscribed {
@@ -52,10 +58,6 @@ pub enum ServerToClientMessage {
         id: Option<Uuid>,
         message: Option<String>,
     },
-}
-
-fn is_zero(x: &usize) -> bool {
-    *x == 0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

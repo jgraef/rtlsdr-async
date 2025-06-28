@@ -18,7 +18,13 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
-use crate::util::sparse_list::SparseList;
+use crate::{
+    source::{
+        beast,
+        sbs,
+    },
+    util::sparse_list::SparseList,
+};
 
 const COMMAND_QUEUE_SIZE: usize = 32;
 
@@ -35,11 +41,11 @@ pub enum Error {
 pub enum Event {}
 
 #[derive(Clone, Debug)]
-pub struct Broker {
+pub struct Tracker {
     command_sender: mpsc::Sender<Command>,
 }
 
-impl Broker {
+impl Tracker {
     pub fn new() -> Self {
         let (command_sender, command_receiver) = mpsc::channel(COMMAND_QUEUE_SIZE);
 
@@ -66,6 +72,7 @@ impl Broker {
         client_id: usize,
         id: Uuid,
         filter: SubscriptionFilter,
+        start_keyframe: bool,
         message_sender: mpsc::Sender<SubscriptionMessage>,
     ) -> Result<(), Error> {
         let (result_sender, result_receiver) = oneshot::channel();
@@ -74,6 +81,7 @@ impl Broker {
             client_id,
             id,
             filter,
+            start_keyframe,
             message_sender,
             result_sender,
         })
@@ -99,7 +107,6 @@ impl Broker {
 #[derive(Debug)]
 struct Reactor {
     subscriptions: Subscriptions,
-
     command_receiver: mpsc::Receiver<Command>,
 }
 
@@ -118,9 +125,14 @@ impl Reactor {
                 client_id,
                 id,
                 filter,
+                start_keyframe,
                 message_sender: event_sender,
                 result_sender,
             } => {
+                if start_keyframe {
+                    todo!("starting keyframe");
+                }
+
                 let result = self
                     .subscriptions
                     .subscribe(client_id, id, filter, event_sender);
@@ -134,9 +146,8 @@ impl Reactor {
                 let result = self.subscriptions.unsubscribe(client_id, id);
                 let _ = result_sender.send(result);
             }
-            Command::Publish {} => {
-                todo!();
-            }
+            Command::PushBeast { source_id, packet } => todo!(),
+            Command::PushSbs { source_id, message } => todo!(),
         }
 
         Ok(())
@@ -149,6 +160,7 @@ enum Command {
         client_id: usize,
         id: Uuid,
         filter: SubscriptionFilter,
+        start_keyframe: bool,
         message_sender: mpsc::Sender<SubscriptionMessage>,
         result_sender: oneshot::Sender<Result<(), Error>>,
     },
@@ -157,8 +169,13 @@ enum Command {
         id: Uuid,
         result_sender: oneshot::Sender<Result<(), Error>>,
     },
-    Publish {
-        // todo: an actual message to distribute to clients
+    PushBeast {
+        source_id: usize,
+        packet: beast::output::OutputPacket,
+    },
+    PushSbs {
+        source_id: usize,
+        message: sbs::Message,
     },
 }
 

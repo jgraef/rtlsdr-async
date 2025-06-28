@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     api::Api,
-    broker::SubscriptionMessage,
+    tracker::SubscriptionMessage,
 };
 
 pub async fn get_live(State(api): State<Api>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
@@ -91,11 +91,21 @@ impl WebSocketHandler {
         message: ClientToServerMessage,
     ) -> Result<(), Error> {
         match message {
-            ClientToServerMessage::Subscribe { id, filter } => {
+            ClientToServerMessage::Subscribe {
+                id,
+                filter,
+                start_keyframe,
+            } => {
                 match self
                     .api
-                    .broker
-                    .subscribe(self.client_id, id, filter, self.subscription_sender.clone())
+                    .tracker
+                    .subscribe(
+                        self.client_id,
+                        id,
+                        filter,
+                        start_keyframe,
+                        self.subscription_sender.clone(),
+                    )
                     .await
                 {
                     Ok(()) => {
@@ -114,7 +124,7 @@ impl WebSocketHandler {
                 }
             }
             ClientToServerMessage::Unsubscribe { id } => {
-                match self.api.broker.unsubscribe(self.client_id, id).await {
+                match self.api.tracker.unsubscribe(self.client_id, id).await {
                     Ok(()) => {
                         self.websocket
                             .send(ServerToClientMessage::Unsubscribed { id })

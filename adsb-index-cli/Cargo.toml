@@ -16,6 +16,8 @@ path = "../adsb-index-api-types"
 clap = { version = "4.5.40", features = ["derive", "env"] }
 color-eyre = "0.6.5"
 dotenvy = "0.15.7"
+futures-util = "0.3.31"
 tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+uuid = { version = "1.17.0", features = ["v4"] }

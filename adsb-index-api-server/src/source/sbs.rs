@@ -82,6 +82,7 @@ impl<R: AsyncRead> Stream for Reader<R> {
                 if !line.is_empty() {
                     match str::from_utf8(line) {
                         Ok(line) => {
+                            tracing::trace!("parsing: {line}");
                             match line.parse() {
                                 Ok(message) => {
                                     return Poll::Ready(Some(Ok(message)));
@@ -130,9 +131,9 @@ impl ReceiveBuffer {
     }
 
     fn scan_for_newline(&mut self) -> Option<usize> {
-        println!(
-            "read_pos={}, write_pos={}, no_newline_until={}",
-            self.read_pos, self.write_pos, self.no_newline_until
+        tracing::trace!(
+            ?self.read_pos, ?self.write_pos, ?self.no_newline_until,
+            "scanning for newline",
         );
 
         if let Some(index) = self.buffer[self.no_newline_until..self.write_pos]
@@ -484,25 +485,32 @@ impl FromStr for Message {
                 };
                 let squawk = || squawk.parse();
                 let alert = || {
-                    parse_bool(alert).ok_or_else(|| {
+                    alert.parse().map_err(|_| {
                         MessageFromStrError::InvalidAlert {
                             value: alert.to_owned(),
                         }
                     })
                 };
                 let emergency = || {
-                    parse_bool(emergency).ok_or_else(|| {
+                    emergency.parse().map_err(|_| {
                         MessageFromStrError::InvalidEmergency {
                             value: emergency.to_owned(),
                         }
                     })
                 };
                 let spi = || {
-                    parse_bool(spi).ok_or_else(|| {
-                        MessageFromStrError::InvalidSpi {
-                            value: spi.to_owned(),
-                        }
-                    })
+                    if spi.is_empty() {
+                        Ok(None)
+                    }
+                    else {
+                        parse_bool(spi)
+                            .ok_or_else(|| {
+                                MessageFromStrError::InvalidSpi {
+                                    value: spi.to_owned(),
+                                }
+                            })
+                            .map(Some)
+                    }
                 };
                 let is_on_ground = || {
                     if is_on_ground.is_empty() {
@@ -759,9 +767,9 @@ pub enum Transmission {
         altitude: Option<u32>,
         latitude: f32,
         longitude: f32,
-        alert: bool,
-        emergency: bool,
-        spi: bool,
+        alert: Alert,
+        emergency: Emergency,
+        spi: Option<bool>,
         is_on_ground: Option<bool>,
     },
     EsAirborneVelocity {
@@ -771,16 +779,16 @@ pub enum Transmission {
     },
     SurveillanceAltMessage {
         altitude: Option<u32>,
-        alert: bool,
-        spi: bool,
+        alert: Alert,
+        spi: Option<bool>,
         is_on_ground: Option<bool>,
     },
     SurveillanceIdMessage {
         altitude: Option<u32>,
         squawk: Squawk,
-        alert: bool,
-        emergency: bool,
-        spi: bool,
+        alert: Alert,
+        emergency: Emergency,
+        spi: Option<bool>,
         is_on_ground: Option<bool>,
     },
     AirToAirMessage {
@@ -791,6 +799,10 @@ pub enum Transmission {
         is_on_ground: Option<bool>,
     },
 }
+
+// todo: what do the values mean? make this an enum
+pub type Alert = u8;
+pub type Emergency = u16;
 
 #[cfg(test)]
 mod tests {
