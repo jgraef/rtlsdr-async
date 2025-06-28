@@ -71,7 +71,7 @@ async fn main() -> Result<(), Error> {
             listen_address,
         } => {
             let database = Database::connect(&database_url).await?;
-            let api = Api::new(database, Tracker::new());
+            let api = Api::new(Default::default(), database, Tracker::new());
             api.serve(listen_address).await?;
         }
         Command::Live {

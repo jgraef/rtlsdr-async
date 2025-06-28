@@ -126,22 +126,22 @@ impl PacketDecode for OutputPacketType {
         match self {
             Self::ModeAc => {
                 Some(OutputPacket::ModeAc {
-                    timestamp: read_bytes(buffer),
-                    signal_level: buffer.get_u8(),
+                    timestamp: MlatTimestamp(read_bytes(buffer)),
+                    signal_level: SignalLevel(buffer.get_u8()),
                     data: read_bytes(buffer),
                 })
             }
             Self::ModeSShort => {
                 Some(OutputPacket::ModeSShort {
-                    timestamp: read_bytes(buffer),
-                    signal_level: buffer.get_u8(),
+                    timestamp: MlatTimestamp(read_bytes(buffer)),
+                    signal_level: SignalLevel(buffer.get_u8()),
                     data: read_bytes(buffer),
                 })
             }
             Self::ModeSLong => {
                 Some(OutputPacket::ModeSLong {
-                    timestamp: read_bytes(buffer),
-                    signal_level: buffer.get_u8(),
+                    timestamp: MlatTimestamp(read_bytes(buffer)),
+                    signal_level: SignalLevel(buffer.get_u8()),
                     data: read_bytes(buffer),
                 })
             }

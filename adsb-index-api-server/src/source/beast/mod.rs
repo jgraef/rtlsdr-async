@@ -47,6 +47,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+/// Timestamp used for multilateration.
+///
 /// # TODO
 ///
 /// decode this into a DateTime? it's big-endian
@@ -74,23 +76,57 @@ pub enum Error {
 ///
 /// [1]: https://wiki.jetvision.de/wiki/Mode-S_Beast:Data_Input_Formats
 /// [2]: https://static.avionix-tech.com/statics/cms/2023-11-21/GNS5894T_ADSB_Module_datasheet_V1.1.pdf
-pub type MlatTimestamp = [u8; 6];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MlatTimestamp(pub [u8; 6]);
 
-/// # TODO
+impl MlatTimestamp {
+    /// A timestamp that indicates the data is synthetic, created from a
+    /// multilateration result.
+    pub const SYNTHETIC_MLAT: Self = Self(*b"\xFF\x00\x4D\x4C\x41\x54");
+
+    /// Timestamp used for synthetic messages from UAT.
+    pub const SYNTHETIC_UAT: Self = Self(*b"\xFF\x00\x4D\x4C\x41\x55");
+    pub const NO_FORWARD: Self = Self(*b"\xFF\x00\x4D\x4C\x41\x60");
+
+    /// Removed timestamp
+    ///
+    /// > clobber timestamp for better compression
+    /// <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/net_io.c#L1840>
+    pub const ANY_TIMESTAMP: Self = Self([0xff; 6]);
+
+    pub fn is_synthetic(&self) -> bool {
+        &self.0[0..5] == b"\xFF\x00\x4D\x4C\x41" || self == &Self::ANY_TIMESTAMP
+    }
+}
+
+/// RSSI encoded as one byte.
 ///
-/// ```c
-/// double signalLevel; // RSSI, in the range [0..1], as a fraction of full-scale power
-/// ```
+/// # References
+///
 /// <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/readsb.h#L970>
-///
-/// ```c
-/// sig = nearbyint(sqrt(mm->signalLevel) * 255);
-/// ```
 /// <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/net_io.c#L1777>
-///
-/// > Logarithmic field-strength indicator
 /// <https://static.avionix-tech.com/statics/cms/2023-11-21/GNS5894T_ADSB_Module_datasheet_V1.1.pdf>
-pub type SignalLevel = u8;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignalLevel(pub u8);
+
+impl SignalLevel {
+    /// Decode signal level information.
+    ///
+    /// This is how readsb encodes it:
+    ///
+    /// ```c
+    /// double signalLevel; // RSSI, in the range [0..1], as a fraction of full-scale power
+    /// ```
+    /// <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/readsb.h#L970>
+    ///
+    /// ```c
+    /// sig = nearbyint(sqrt(mm->signalLevel) * 255);
+    /// ```
+    /// <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/net_io.c#L1777>
+    pub fn decode(&self) -> f32 {
+        (f32::from(self.0) / 255.0).clamp(0.0, 1.0).powi(2)
+    }
+}
 
 pub trait PacketType {
     type Packet;

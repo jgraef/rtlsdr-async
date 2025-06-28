@@ -33,21 +33,36 @@ use crate::{
     tracker::Tracker,
 };
 
+#[derive(Debug)]
+pub struct Config {
+    pub live_queue_size: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            live_queue_size: 128,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Api {
     pub database: Database,
     pub tracker: Tracker,
     pub shutdown: CancellationToken,
     next_client_id: Arc<AtomicUsize>,
+    pub config: Arc<Config>,
 }
 
 impl Api {
-    pub fn new(database: Database, tracker: Tracker) -> Self {
+    pub fn new(config: Config, database: Database, tracker: Tracker) -> Self {
         Self {
             database,
             tracker,
             shutdown: CancellationToken::new(),
             next_client_id: Arc::new(AtomicUsize::new(1)),
+            config: Arc::new(config),
         }
     }
 

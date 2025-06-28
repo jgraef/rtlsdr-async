@@ -8,10 +8,6 @@ use adsb_index_api_types::{
         SubscriptionFilter,
     },
 };
-use serde::{
-    Deserialize,
-    Serialize,
-};
 use tokio::sync::{
     mpsc,
     oneshot,
@@ -37,9 +33,15 @@ pub enum Error {
     InvalidSubscriptionId { client_id: usize, id: Uuid },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub enum Event {}
-
+/// Tracks aircrafts' state and notifies subscribers.
+///
+/// This struct is actually just a sender to a command channel, so it's cheap to
+/// clone. When creating a [`Tracker`], a task is spawned that performs all the
+/// work. This task can be controlled by sending commands, which is done by the
+/// methods on this struct.
+///
+/// When the last [`Tracker`] is dropped the command channel is closed, which
+/// signals the spawned task to terminate.
 #[derive(Clone, Debug)]
 pub struct Tracker {
     command_sender: mpsc::Sender<Command>,

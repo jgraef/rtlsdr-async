@@ -24,6 +24,7 @@ use crate::{
 };
 
 pub async fn get_live(State(api): State<Api>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
+    // todo: add query with options (format, compression)
     upgrade.on_upgrade(async move |websocket| {
         WebSocketHandler::new(api, websocket).run().await;
     })
@@ -40,7 +41,8 @@ struct WebSocketHandler {
 
 impl WebSocketHandler {
     fn new(api: Api, websocket: ws::WebSocket) -> Self {
-        let (subscription_sender, subscription_receiver) = mpsc::channel(128);
+        let (subscription_sender, subscription_receiver) =
+            mpsc::channel(api.config.live_queue_size);
 
         Self {
             client_id: api.next_client_id(),
@@ -75,6 +77,7 @@ impl WebSocketHandler {
                     }
                 }
                 message = self.subscription_receiver.recv() => {
+                    // todo: batch messages? might help with overhead, and would improve compression
                     // the channel should never close, since we hold a sender to it.
                     let message = message.expect("subscription event channel closed unexpectedly");
                     if let Err(error) = self.handle_subscription_message(message).await {
