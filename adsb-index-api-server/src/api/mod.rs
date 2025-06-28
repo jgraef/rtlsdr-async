@@ -1,7 +1,15 @@
 pub mod flights;
 pub mod live;
 
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex, RwLock};
+use std::sync::{
+    Arc,
+    Mutex,
+    RwLock,
+    atomic::{
+        AtomicUsize,
+        Ordering,
+    },
+};
 
 use axum::{
     Json,
@@ -20,7 +28,10 @@ use tokio::net::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{broker::Broker, database::Database};
+use crate::{
+    broker::Broker,
+    database::Database,
+};
 
 #[derive(Clone, Debug)]
 pub struct Api {

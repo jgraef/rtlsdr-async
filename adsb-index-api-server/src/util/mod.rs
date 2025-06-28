@@ -1,6 +1,7 @@
-use std::sync::OnceLock;
-
 pub mod json;
+pub mod sparse_list;
+
+use std::sync::OnceLock;
 
 pub fn http_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();

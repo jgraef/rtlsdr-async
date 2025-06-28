@@ -1,10 +1,13 @@
+#![allow(dead_code)]
+
 pub mod api;
 pub mod broker;
 pub mod country;
 pub mod database;
+pub mod processor;
 pub mod source;
 pub mod spatial;
-pub mod util;
+pub(crate) mod util;
 
 // aircraft info:
 // https://raw.githubusercontent.com/wiedehopf/tar1090-db/csv/aircraft.csv.gz
@@ -19,6 +22,8 @@ pub mod util;
 // https://adsb.lol/globe_history/2025/06/24/traces/dd/trace_full_0101dd.json
 //
 // advisories: https://github.com/wiedehopf/tar1090-aux
+//
+// ads-b protocol: http://www.anteni.net/adsb/Doc/1090-WP30-18-DRAFT_DO-260B-V42.pdf
 
 #[derive(Debug, thiserror::Error)]
 #[error("adsb-index error")]

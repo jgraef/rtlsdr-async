@@ -92,25 +92,44 @@ impl WebSocketHandler {
     ) -> Result<(), Error> {
         match message {
             ClientToServerMessage::Subscribe { id, filter } => {
-                match self.api.broker.subscribe(self.client_id, id, filter, self.subscription_sender.clone()).await {
+                match self
+                    .api
+                    .broker
+                    .subscribe(self.client_id, id, filter, self.subscription_sender.clone())
+                    .await
+                {
                     Ok(()) => {
-                        self.websocket.send(ServerToClientMessage::Subscribed { id }).await?;
+                        self.websocket
+                            .send(ServerToClientMessage::Subscribed { id })
+                            .await?;
                     }
                     Err(error) => {
-                        self.websocket.send(ServerToClientMessage::Error { id: Some(id), message: Some(error.to_string()) }).await?;
+                        self.websocket
+                            .send(ServerToClientMessage::Error {
+                                id: Some(id),
+                                message: Some(error.to_string()),
+                            })
+                            .await?;
                     }
                 }
-            },
+            }
             ClientToServerMessage::Unsubscribe { id } => {
-                match self.api.broker.unsubscribe(id).await {
+                match self.api.broker.unsubscribe(self.client_id, id).await {
                     Ok(()) => {
-                        self.websocket.send(ServerToClientMessage::Unsubscribed { id }).await?;
+                        self.websocket
+                            .send(ServerToClientMessage::Unsubscribed { id })
+                            .await?;
                     }
                     Err(error) => {
-                        self.websocket.send(ServerToClientMessage::Error { id: Some(id), message: Some(error.to_string()) }).await?;
+                        self.websocket
+                            .send(ServerToClientMessage::Error {
+                                id: Some(id),
+                                message: Some(error.to_string()),
+                            })
+                            .await?;
                     }
                 }
-            },
+            }
         }
 
         Ok(())
@@ -153,7 +172,7 @@ impl Error {
                     code: CloseCode::INTERNAL_ERROR,
                     reason: "internal error".to_owned(),
                 }
-            },
+            }
         }
     }
 }

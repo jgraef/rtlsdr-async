@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = [ "adsb-index-api-types","adsb-index-cli", "adsb-index-client", "adsb-index-server"]
+members = ["adsb-index-api-client", "adsb-index-api-server", "adsb-index-api-types","adsb-index-cli"]

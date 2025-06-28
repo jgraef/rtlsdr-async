@@ -42,8 +42,12 @@ pub enum ServerToClientMessage {
         #[serde(skip_serializing_if = "is_zero")]
         dropped_count: usize,
     },
-    Subscribed { id: Uuid },
-    Unsubscribed { id: Uuid },
+    Subscribed {
+        id: Uuid,
+    },
+    Unsubscribed {
+        id: Uuid,
+    },
     Error {
         id: Option<Uuid>,
         message: Option<String>,

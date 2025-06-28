@@ -3,11 +3,11 @@ name = "adsb-index-cli"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies.adsb-index-server]
-path = "../adsb-index-server"
+[dependencies.adsb-index-api-server]
+path = "../adsb-index-api-server"
 
-[dependencies.adsb-index-client]
-path = "../adsb-index-client"
+[dependencies.adsb-index-api-client]
+path = "../adsb-index-api-client"
 
 [dependencies.adsb-index-api-types]
 path = "../adsb-index-api-types"
