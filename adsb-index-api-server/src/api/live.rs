@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use adsb_index_api_types::live::{
     ClientToServerMessage,
     ServerToClientMessage,
@@ -18,10 +20,7 @@ use serde::{
 };
 use tokio::sync::mpsc;
 
-use crate::{
-    api::Api,
-    tracker::SubscriptionMessage,
-};
+use crate::api::Api;
 
 pub async fn get_live(State(api): State<Api>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
     // todo: add query with options (format, compression)
@@ -30,13 +29,16 @@ pub async fn get_live(State(api): State<Api>, upgrade: WebSocketUpgrade) -> impl
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClientId(NonZeroUsize);
+
 #[derive(Debug)]
 struct WebSocketHandler {
-    client_id: usize,
+    client_id: ClientId,
     api: Api,
     websocket: WebSocket,
-    subscription_sender: mpsc::Sender<SubscriptionMessage>,
-    subscription_receiver: mpsc::Receiver<SubscriptionMessage>,
+    subscription_sender: mpsc::Sender<ServerToClientMessage>,
+    subscription_receiver: mpsc::Receiver<ServerToClientMessage>,
 }
 
 impl WebSocketHandler {
@@ -45,7 +47,7 @@ impl WebSocketHandler {
             mpsc::channel(api.config.live_queue_size);
 
         Self {
-            client_id: api.next_client_id(),
+            client_id: ClientId(api.client_ids.next()),
             api,
             websocket: websocket.into(),
             subscription_sender,
@@ -56,36 +58,39 @@ impl WebSocketHandler {
     async fn run(mut self) {
         loop {
             tokio::select! {
-                _ = self.api.shutdown.cancelled() => {
-                    let _ = self.websocket.send_close(CloseReason { code: CloseCode::GOING_AWAY, reason: Default::default() }).await;
-                    break;
-                }
-                message = self.websocket.receive::<ClientToServerMessage>() => {
-                    match message {
-                        Err(error) => {
-                            tracing::error!(?error, "websocket receive error");
-                            let _ = self.websocket.send_close(error.as_close_reason()).await;
-                            break;
-                        }
-                        Ok(None) => break,
-                        Ok(Some(message)) => {
-                            if let Err(error) = self.handle_websocket_message(message).await {
-                                let _ = self.websocket.send_close(error.as_close_reason()).await;
+                            _ = self.api.shutdown.cancelled() => {
+                                let _ = self.websocket.send_close(CloseReason { code: CloseCode::GOING_AWAY, reason: Default::default() }).await;
                                 break;
                             }
+                            message = self.websocket.receive::<ClientToServerMessage>() => {
+                                match message {
+                                    Err(error) => {
+                                        tracing::error!(?error, "websocket receive error");
+                                        let _ = self.websocket.send_close(error.as_close_reason()).await;
+                                        break;
+                                    }
+                                    Ok(None) => break,
+                                    Ok(Some(message)) => {
+                                        if let Err(error) = self.handle_websocket_message(message).await {
+                                            let _ = self.websocket.send_close(error.as_close_reason()).await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            message = self.subscription_receiver.recv() => {
+                                // todo: batch messages? might help with overhead, and would improve compression
+                                // the channel should never close, since we hold a sender to it.
+                                let message = message.expect("subscription event channel closed unexpectedly");
+
+                                if let Err(error) = self.websocket
+                                        .send(message)
+                                        .await {
+            let _ = self.websocket.send_close(error.as_close_reason()).await;
+                                    break;
+                                        }
+                            }
                         }
-                    }
-                }
-                message = self.subscription_receiver.recv() => {
-                    // todo: batch messages? might help with overhead, and would improve compression
-                    // the channel should never close, since we hold a sender to it.
-                    let message = message.expect("subscription event channel closed unexpectedly");
-                    if let Err(error) = self.handle_subscription_message(message).await {
-                        let _ = self.websocket.send_close(error.as_close_reason()).await;
-                        break;
-                    }
-                }
-            }
         }
     }
 
@@ -99,8 +104,7 @@ impl WebSocketHandler {
                 filter,
                 start_keyframe,
             } => {
-                match self
-                    .api
+                self.api
                     .tracker
                     .subscribe(
                         self.client_id,
@@ -109,56 +113,15 @@ impl WebSocketHandler {
                         start_keyframe,
                         self.subscription_sender.clone(),
                     )
-                    .await
-                {
-                    Ok(()) => {
-                        self.websocket
-                            .send(ServerToClientMessage::Subscribed { id })
-                            .await?;
-                    }
-                    Err(error) => {
-                        self.websocket
-                            .send(ServerToClientMessage::Error {
-                                id: Some(id),
-                                message: Some(error.to_string()),
-                            })
-                            .await?;
-                    }
-                }
+                    .await;
             }
             ClientToServerMessage::Unsubscribe { id } => {
-                match self.api.tracker.unsubscribe(self.client_id, id).await {
-                    Ok(()) => {
-                        self.websocket
-                            .send(ServerToClientMessage::Unsubscribed { id })
-                            .await?;
-                    }
-                    Err(error) => {
-                        self.websocket
-                            .send(ServerToClientMessage::Error {
-                                id: Some(id),
-                                message: Some(error.to_string()),
-                            })
-                            .await?;
-                    }
-                }
+                self.api
+                    .tracker
+                    .unsubscribe(self.client_id, id, self.subscription_sender.clone())
+                    .await;
             }
         }
-
-        Ok(())
-    }
-
-    async fn handle_subscription_message(
-        &mut self,
-        message: SubscriptionMessage,
-    ) -> Result<(), Error> {
-        self.websocket
-            .send(&ServerToClientMessage::Subscription {
-                id: message.id,
-                event: message.event,
-                dropped_count: message.dropped_count,
-            })
-            .await?;
 
         Ok(())
     }

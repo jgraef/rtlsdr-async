@@ -448,6 +448,11 @@ impl Default for PacketDecoder {
 }
 
 pin_project! {
+    /// Keeps track of the receiver ID.
+    ///
+    /// This will consume any [`OutputPacket::ReceiverId`] packets from the
+    /// underlying stream and yield all other packets together with the last
+    /// received receiver ID.
     #[derive(Debug)]
     pub struct ReaderWithReceiverId<R> {
         #[pin]
@@ -465,14 +470,8 @@ impl<R> ReaderWithReceiverId<R> {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct PacketWithReceiverId {
-    pub packet: OutputPacket,
-    pub receiver_id: Option<Uuid>,
-}
-
 impl<R: AsyncRead> Stream for ReaderWithReceiverId<R> {
-    type Item = Result<PacketWithReceiverId, Error>;
+    type Item = Result<(Option<Uuid>, OutputPacket), Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -485,10 +484,7 @@ impl<R: AsyncRead> Stream for ReaderWithReceiverId<R> {
                     *this.receiver_id = Some(id);
                 }
                 Poll::Ready(Some(Ok(packet))) => {
-                    return Poll::Ready(Some(Ok(PacketWithReceiverId {
-                        packet,
-                        receiver_id: self.receiver_id,
-                    })));
+                    return Poll::Ready(Some(Ok((self.receiver_id, packet))));
                 }
             }
         }

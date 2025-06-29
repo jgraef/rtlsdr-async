@@ -106,28 +106,27 @@ async fn main() -> Result<(), Error> {
             .await?;
         }
         Command::BeastClient(args) => {
-            args.run(
-                |connection| beast::output::Reader::new(connection),
-                |i, packet| {
-                    match packet {
-                        beast::output::OutputPacket::ModeAc { .. } => {}
-                        beast::output::OutputPacket::ModeSLong { data, .. } => {
-                            if let Ok(frame) = adsb::Frame::from_bytes(&data) {
-                                match frame.df {
-                                    adsb::DF::ADSB(adsb) => println!("{adsb:#?}"),
-                                    _ => {}
-                                }
+            args.run(beast::output::Reader::new, |_i, packet| {
+                match packet {
+                    beast::output::OutputPacket::ModeAc { .. } => {}
+                    beast::output::OutputPacket::ModeSLong {
+                        timestamp, data, ..
+                    } => {
+                        if let Ok(frame) = adsb::Frame::from_bytes(&data) {
+                            match frame.df {
+                                adsb::DF::ADSB(adsb) => println!("{timestamp:?}: {adsb:#?}"),
+                                _ => {}
                             }
                         }
-                        beast::output::OutputPacket::ModeSShort { data, .. } => {
-                            println!("{data:?}");
-                            let frame = adsb::Frame::from_bytes(&data).unwrap();
-                            println!("{frame:#?}");
-                        }
-                        _ => todo!("{packet:?}"),
                     }
-                },
-            )
+                    beast::output::OutputPacket::ModeSShort { data, .. } => {
+                        println!("{data:?}");
+                        let frame = adsb::Frame::from_bytes(&data).unwrap();
+                        println!("{frame:#?}");
+                    }
+                    _ => todo!("{packet:?}"),
+                }
+            })
             .await?;
         }
     }
@@ -136,13 +135,13 @@ async fn main() -> Result<(), Error> {
 }
 
 #[derive(Debug, Parser)]
-pub struct Args {
+struct Args {
     #[clap(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum Command {
+enum Command {
     IndexArchiveDay {
         #[clap(long, env = "DATABASE_URL")]
         database_url: String,
@@ -188,17 +187,13 @@ struct ClientTestArgs {
 }
 
 impl ClientTestArgs {
-    pub async fn run<
-        T: Debug,
+    pub async fn run<T, F, R, E, P>(&self, f: F, mut p: P) -> Result<(), Error>
+    where
         F: FnOnce(BufReader<Pin<Box<dyn AsyncRead>>>) -> R,
         R: Stream<Item = Result<T, E>>,
         E: std::error::Error + Send + Sync + 'static,
         P: FnMut(usize, T),
-    >(
-        &self,
-        f: F,
-        mut p: P,
-    ) -> Result<(), Error> {
+    {
         let input: Pin<Box<dyn AsyncRead>> = match (&self.address, &self.file) {
             (Some(address), None) => Box::pin(TcpStream::connect(&address).await?),
             (None, Some(file)) => Box::pin(File::open(&file).await?),

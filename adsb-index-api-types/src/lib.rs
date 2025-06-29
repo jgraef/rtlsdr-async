@@ -1,8 +1,12 @@
 pub mod flights;
 pub mod live;
+pub(crate) mod util;
+
 #[cfg(feature = "sqlx")]
 mod sqlx;
-pub(crate) mod util;
+
+#[cfg(feature = "adsb_deku")]
+mod adsb_deku;
 
 use std::{
     fmt::{
@@ -56,6 +60,11 @@ impl IcaoAddress {
         let b = self.address.to_be_bytes();
         assert!(b[0] == 0);
         [b[1], b[2], b[3]]
+    }
+
+    pub fn from_bytes(bytes: [u8; 3]) -> Self {
+        let b = [0, bytes[0], bytes[1], bytes[2]];
+        Self::from_u32_unchecked(u32::from_be_bytes(b))
     }
 }
 

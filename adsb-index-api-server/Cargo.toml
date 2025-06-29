@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies.adsb-index-api-types]
 path = "../adsb-index-api-types"
-features = ["sqlx"]
+features = ["sqlx", "adsb_deku"]
 
 [dependencies]
 adsb_deku = { version = "0.8.0", features = ["serde"], git = "https://github.com/rsadsb/adsb_deku.git", branch = "update-deku-0-19-1" }

@@ -1,15 +1,7 @@
 pub mod flights;
 pub mod live;
 
-use std::sync::{
-    Arc,
-    Mutex,
-    RwLock,
-    atomic::{
-        AtomicUsize,
-        Ordering,
-    },
-};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -31,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     database::Database,
     tracker::Tracker,
+    util::AtomicIdGenerator,
 };
 
 #[derive(Debug)]
@@ -51,7 +44,7 @@ pub struct Api {
     pub database: Database,
     pub tracker: Tracker,
     pub shutdown: CancellationToken,
-    next_client_id: Arc<AtomicUsize>,
+    pub client_ids: Arc<AtomicIdGenerator>,
     pub config: Arc<Config>,
 }
 
@@ -61,7 +54,7 @@ impl Api {
             database,
             tracker,
             shutdown: CancellationToken::new(),
-            next_client_id: Arc::new(AtomicUsize::new(1)),
+            client_ids: Default::default(),
             config: Arc::new(config),
         }
     }
@@ -90,10 +83,6 @@ impl Api {
             .await?;
 
         Ok(())
-    }
-
-    pub fn next_client_id(&self) -> usize {
-        self.next_client_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -145,7 +134,7 @@ impl ApiError {
 }
 
 impl From<crate::database::Error> for ApiError {
-    fn from(value: crate::database::Error) -> Self {
+    fn from(_value: crate::database::Error) -> Self {
         Self::InternalServerError
     }
 }

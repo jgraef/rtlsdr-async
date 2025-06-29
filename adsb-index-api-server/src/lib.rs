@@ -23,6 +23,13 @@ pub(crate) mod util;
 // advisories: https://github.com/wiedehopf/tar1090-aux
 //
 // ads-b protocol: http://www.anteni.net/adsb/Doc/1090-WP30-18-DRAFT_DO-260B-V42.pdf
+//
+// lots of data
+// https://github.com/vradarserver/standing-data/
+//
+// routes:
+// https://github.com/adsblol/api/blob/main/src/adsb_api/utils/api_routes.py
+// https://api.adsb.lol/api/0/routeset
 
 #[derive(Debug, thiserror::Error)]
 #[error("adsb-index error")]
@@ -38,6 +45,8 @@ pub enum Error {
     Tar1090AircraftFlags(#[from] crate::source::tar1090_db::AircraftFlagsFromStrError),
     #[error("tar1090-db has no commits")]
     Tar1090NoCommits,
+    Beast(#[from] crate::source::beast::Error),
+    Sbs(#[from] crate::source::sbs::Error),
 }
 
 impl From<sqlx::Error> for Error {

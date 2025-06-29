@@ -29,6 +29,7 @@ use crate::{
     util::json::json_decode,
 };
 
+// todo: batch inserts with UNNEST
 pub async fn index_archive_day_from_directory(
     database: &Database,
     path: impl AsRef<Path>,
