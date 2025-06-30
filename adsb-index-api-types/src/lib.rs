@@ -30,7 +30,8 @@ use serde_with::{
 )]
 pub struct IcaoAddress {
     address: u32,
-    non_icao: bool, // todo: how should this be handled correctly?
+    // todo: store this in the address field
+    non_icao: bool,
 }
 
 impl IcaoAddress {
@@ -136,6 +137,21 @@ impl Squawk {
 
     pub fn from_u16(code: u16) -> Option<Self> {
         (code < 010000).then(|| Self::from_u16_unchecked(code))
+    }
+
+    /// Decodes the "hex-encoded" squawk
+    ///
+    /// This encoding is the same as Mode A, but without the ident bit.
+    /// All irrelevant bits are ignored.
+    pub const fn from_u16_hex(code: u16) -> Self {
+        // bit:    f e d c b a 9 8 7 6 5 4 3 2 1
+        // squawk: a a a 0 b b b 0 c c c 0 d d d -> aaabbbcccddd
+
+        let code = ((code & 0x7000) >> 3)
+            | ((code & 0x0700) >> 2)
+            | ((code & 0x0070) >> 1)
+            | (code & 0x0007);
+        Squawk::from_u16_unchecked(code)
     }
 }
 

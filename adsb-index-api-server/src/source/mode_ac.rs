@@ -1,5 +1,8 @@
 use adsb_index_api_types::Squawk;
 
+// todo
+// good info: http://www.aeroelectric.com/articles/Altitude_Encoding/modec.htm
+
 #[derive(Clone, Copy, Debug)]
 pub enum ModeAc {
     ModeA(ModeA),
@@ -12,7 +15,7 @@ impl ModeAc {
             Self::ModeC(mode_c)
         }
         else {
-            Self::ModeA(ModeA::decode(data))
+            Self::ModeA(ModeA::from_bytes(data))
         }
     }
 }
@@ -24,14 +27,19 @@ pub struct ModeA {
 }
 
 impl ModeA {
-    pub fn decode(data: [u8; 2]) -> Self {
-        // Mode A packet:
+    pub fn from_bytes(data: [u8; 2]) -> Self {
+        // todo: is this big-endian? does this use this "gillham" code?
+        Self::from_u16(u16::from_be_bytes(data))
+    }
+
+    /// Decode squawk and ident flag from 16bit word.
+    pub fn from_u16(word: u16) -> Self {
+        // fixme: this is not correct! the bits need to be jumbled lol
+
+        // Mode A:
         // bit:    f e d c b a 9 8 7 6 5 4 3 2 1
         // squawk: a a a 0 b b b 0 c c c 0 d d d -> aaabbbcccddd
         // ident:  0 0 0 0 0 0 0 1 0 0 0 0 0 0 0
-
-        // todo: is this big-endian?
-        let word = u16::from_be_bytes(data);
 
         let squawk = ((word & 0x7000) >> 3)
             | ((word & 0x0700) >> 2)
@@ -51,6 +59,7 @@ pub struct ModeC {}
 
 impl ModeC {
     pub fn decode(_data: [u8; 2]) -> Result<ModeC, ModeCDecodeError> {
+        // look at https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html # Altitude reply
         todo!();
     }
 }

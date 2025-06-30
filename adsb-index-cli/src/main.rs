@@ -15,7 +15,10 @@ use adsb_index_api_server::{
         sbs,
         tar1090_db::update_aircraft_db,
     },
-    tracker::Tracker,
+    tracker::{
+        Tracker,
+        state::State,
+    },
 };
 use adsb_index_api_types::{
     IcaoAddress,
@@ -23,6 +26,7 @@ use adsb_index_api_types::{
     flights::AircraftQuery,
     live::SubscriptionFilter,
 };
+use chrono::Utc;
 use clap::{
     Parser,
     Subcommand,
@@ -106,26 +110,21 @@ async fn main() -> Result<(), Error> {
             .await?;
         }
         Command::BeastClient(args) => {
+            let mut state = State::default();
             args.run(beast::output::Reader::new, |_i, packet| {
-                match packet {
-                    beast::output::OutputPacket::ModeAc { .. } => {}
-                    beast::output::OutputPacket::ModeSLong {
-                        timestamp, data, ..
-                    } => {
-                        if let Ok(frame) = adsb::Frame::from_bytes(&data) {
-                            match frame.df {
-                                adsb::DF::ADSB(adsb) => println!("{timestamp:?}: {adsb:#?}"),
-                                _ => {}
-                            }
-                        }
+                let frame = match packet {
+                    beast::output::OutputPacket::ModeAc { .. } => return,
+                    beast::output::OutputPacket::ModeSLong { data, .. } => {
+                        adsb::Frame::from_bytes(&data)
                     }
                     beast::output::OutputPacket::ModeSShort { data, .. } => {
-                        println!("{data:?}");
-                        let frame = adsb::Frame::from_bytes(&data).unwrap();
-                        println!("{frame:#?}");
+                        adsb::Frame::from_bytes(&data)
                     }
                     _ => todo!("{packet:?}"),
                 }
+                .expect("invalid packet");
+                state.update_with_modes_frame(Utc::now(), &frame);
+                println!("{frame:?}");
             })
             .await?;
         }

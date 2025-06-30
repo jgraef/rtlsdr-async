@@ -30,6 +30,8 @@ pub(crate) mod util;
 // routes:
 // https://github.com/adsblol/api/blob/main/src/adsb_api/utils/api_routes.py
 // https://api.adsb.lol/api/0/routeset
+//
+// good doc on mode-s: https://mode-s.org/1090mhz/misc/preface.html
 
 #[derive(Debug, thiserror::Error)]
 #[error("adsb-index error")]

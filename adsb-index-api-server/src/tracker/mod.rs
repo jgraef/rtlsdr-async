@@ -17,12 +17,16 @@ use crate::{
     source::{
         SourceId,
         adsb,
-        beast,
+        beast::{
+            self,
+            MlatTimestamp,
+        },
         sbs,
     },
     tracker::{
         state::{
             Position,
+            PositionSource,
             State,
         },
         subscriptions::Subscriptions,
@@ -223,20 +227,35 @@ impl Reactor {
         packet: beast::output::OutputPacket,
     ) -> Result<(), Error> {
         match packet {
+            beast::output::OutputPacket::ModeSShort {
+                timestamp,
+                signal_level,
+                data,
+            } => {
+                self.handle_modes_packet(
+                    source_id,
+                    receiver_id,
+                    timestamp,
+                    time_received,
+                    signal_level,
+                    &data,
+                )
+                .await?;
+            }
             beast::output::OutputPacket::ModeSLong {
                 timestamp,
                 signal_level,
                 data,
             } => {
-                let time = if timestamp.is_synthetic() {
-                    time_received
-                }
-                else {
-                    todo!("parse beast::MlatTimestamp");
-                };
-
-                self.handle_modes_packet(source_id, receiver_id, time, signal_level, &data)
-                    .await?
+                self.handle_modes_packet(
+                    source_id,
+                    receiver_id,
+                    timestamp,
+                    time_received,
+                    signal_level,
+                    &data,
+                )
+                .await?;
             }
             _ => {}
         }
@@ -248,37 +267,27 @@ impl Reactor {
         &mut self,
         source_id: SourceId,
         receiver_id: Option<Uuid>,
-        time: DateTime<Utc>,
+        mlat_timestamp: MlatTimestamp,
+        time_received: DateTime<Utc>,
         signal_level: beast::SignalLevel,
         data: &[u8],
     ) -> Result<(), Error> {
+        let time = if mlat_timestamp.is_synthetic() {
+            time_received
+        }
+        else {
+            todo!("parse beast::MlatTimestamp");
+        };
+
         match adsb::Frame::from_bytes(data) {
             Ok(frame) => {
-                match frame.df {
-                    adsb_deku::DF::ADSB(adsb) => {
-                        self.handle_adsb_packet(source_id, receiver_id, time, signal_level, adsb)
-                            .await?
-                    }
-                    _ => {}
-                }
+                self.state.update_with_modes_frame(time, &frame);
             }
             Err(error) => {
                 tracing::error!(?error);
             }
         }
 
-        Ok(())
-    }
-
-    async fn handle_adsb_packet(
-        &mut self,
-        _source_id: SourceId,
-        _receiver_id: Option<Uuid>,
-        time: DateTime<Utc>,
-        _signal_level: beast::SignalLevel,
-        packet: adsb::adsb::ADSB,
-    ) -> Result<(), Error> {
-        self.state.update_adsb_data(time, &packet);
         Ok(())
     }
 
@@ -305,6 +314,7 @@ impl Reactor {
                     Position {
                         latitude,
                         longitude,
+                        source: PositionSource::Mlat,
                     },
                 );
             }

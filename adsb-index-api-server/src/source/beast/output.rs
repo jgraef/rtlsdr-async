@@ -17,13 +17,16 @@ use tokio::io::{
 };
 use uuid::Uuid;
 
-use crate::source::beast::{
-    ESCAPE,
-    Error,
-    MlatTimestamp,
-    PacketDecode,
-    PacketType,
-    SignalLevel,
+use crate::{
+    source::beast::{
+        ESCAPE,
+        Error,
+        MlatTimestamp,
+        PacketDecode,
+        PacketType,
+        SignalLevel,
+    },
+    util::BufReadBytesExt,
 };
 
 /// this can be larger for more efficient reads, although the underlying reader
@@ -117,43 +120,37 @@ impl PacketType for OutputPacketType {
 
 impl PacketDecode for OutputPacketType {
     fn decode<B: Buf>(&self, buffer: &mut B) -> Option<OutputPacket> {
-        fn read_bytes<B: Buf, const N: usize>(buffer: &mut B) -> [u8; N] {
-            let mut data: [u8; N] = [0; N];
-            buffer.copy_to_slice(&mut data[..]);
-            data
-        }
-
         match self {
             Self::ModeAc => {
                 Some(OutputPacket::ModeAc {
-                    timestamp: MlatTimestamp(read_bytes(buffer)),
+                    timestamp: MlatTimestamp(buffer.get_bytes()),
                     signal_level: SignalLevel(buffer.get_u8()),
-                    data: read_bytes(buffer),
+                    data: buffer.get_bytes(),
                 })
             }
             Self::ModeSShort => {
                 Some(OutputPacket::ModeSShort {
-                    timestamp: MlatTimestamp(read_bytes(buffer)),
+                    timestamp: MlatTimestamp(buffer.get_bytes()),
                     signal_level: SignalLevel(buffer.get_u8()),
-                    data: read_bytes(buffer),
+                    data: buffer.get_bytes(),
                 })
             }
             Self::ModeSLong => {
                 Some(OutputPacket::ModeSLong {
-                    timestamp: MlatTimestamp(read_bytes(buffer)),
+                    timestamp: MlatTimestamp(buffer.get_bytes()),
                     signal_level: SignalLevel(buffer.get_u8()),
-                    data: read_bytes(buffer),
+                    data: buffer.get_bytes(),
                 })
             }
             Self::DipSwitches => Some(OutputPacket::DipSwitches(buffer.get_u8())),
             Self::Ping => {
                 Some(OutputPacket::Ping {
-                    data: read_bytes(buffer),
+                    data: buffer.get_bytes(),
                 })
             }
             Self::ReceiverId => {
                 Some(OutputPacket::ReceiverId {
-                    receiver_id: Uuid::from_bytes(read_bytes(buffer)),
+                    receiver_id: Uuid::from_bytes(buffer.get_bytes()),
                 })
             }
             Self::Unknown(byte) => {
