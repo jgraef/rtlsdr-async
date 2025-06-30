@@ -19,7 +19,14 @@ use chrono::{
 };
 
 use crate::{
-    source::adsb_deku as adsb,
+    source::mode_s::{
+        self,
+        adsb::{
+            self,
+            Callsign,
+        },
+        cpr,
+    },
     util::sparse_list::SparseList,
 };
 
@@ -27,7 +34,7 @@ use crate::{
 pub struct State {
     aircraft: SparseList<AircraftState>,
     by_icao_address: HashMap<IcaoAddress, usize>,
-    by_callsign: HashMap<String, usize>,
+    by_callsign: HashMap<Callsign, usize>,
     by_squawk: HashMap<Squawk, usize>,
 }
 
@@ -72,87 +79,60 @@ impl State {
         aircraft.position.update(time, position);
     }
 
-    pub fn update_with_modes_frame(&mut self, time: DateTime<Utc>, frame: &adsb::Frame) {
-        tracing::debug!("Mode-S frame: {frame:#?}");
+    pub fn update_with_mode_s(&mut self, time: DateTime<Utc>, frame: &mode_s::Frame) {
+        //tracing::debug!("Mode-S frame: {frame:#?}");
 
-        match &frame.df {
-            adsb::DF::ADSB(adsb) => {
-                let icao_address = adsb.icao.into();
-                let mut aircraft = self.update_aircraft(icao_address, time);
-
-                aircraft.mode_s_packets.push(frame.df.clone());
-
-                match &adsb.me {
-                    adsb::adsb::ME::AirbornePositionBaroAltitude { altitude, .. } => {
-                        aircraft.update_airborne_position(altitude, AltitudeType::Barometric);
-                    }
-                    adsb::adsb::ME::AirborneVelocity(airborne_velocity) => {
-                        aircraft.update_airborne_velocity(time, airborne_velocity);
-                    }
-                    adsb::adsb::ME::AircraftIdentification { identification, .. } => {
-                        aircraft.update_aircraft_identification(identification);
-                    }
-                    adsb::adsb::ME::SurfacePosition { id, surface } => todo!(),
-                    adsb::adsb::ME::AirbornePositionGNSSAltitude { id, altitude } => {
-                        aircraft.update_airborne_position(altitude, AltitudeType::Gnss);
-                    }
-                    adsb::adsb::ME::Reserved0(_) => todo!(),
-                    adsb::adsb::ME::SurfaceSystemStatus(_) => todo!(),
-                    adsb::adsb::ME::Reserved1 { id, slice } => todo!(),
-                    adsb::adsb::ME::AircraftStatus(aircraft_status) => {
-                        aircraft.update_aircraft_status(aircraft_status);
-                    }
-                    adsb::adsb::ME::TargetStateAndStatusInformation(
-                        target_state_and_status_information,
-                    ) => todo!(),
-                    adsb::adsb::ME::AircraftOperationalCoordination(_) => todo!(),
-                    adsb::adsb::ME::AircraftOperationStatus(operation_status) => todo!(),
-                    _ => {
-                        tracing::debug!("unhandled ads-b frame: {frame:?}");
-                    }
-                }
+        match frame {
+            mode_s::Frame::AllCallReply(mode_s::AllCallReply {
+                address_announced, ..
+            }) => {
+                self.update_aircraft(*address_announced, time);
             }
-            adsb::DF::AllCallReply {
-                capability,
-                icao,
-                p_icao,
-            } => {
-                self.update_aircraft((*icao).into(), time);
+            mode_s::Frame::ExtendedSquitter(mode_s::ExtendedSquitter {
+                address_announced,
+                adsb_message,
+                ..
+            }) => {
+                self.update_with_adsb(time, *address_announced, adsb_message);
             }
-            adsb::DF::ShortAirAirSurveillance {
-                vs,
-                cc,
-                unused,
-                sl,
-                unused1,
-                ri,
-                unused2,
-                altitude,
-                parity,
-            } => todo!(),
-            adsb::DF::SurveillanceAltitudeReply { fs, dr, um, ac, ap } => todo!(),
-            adsb::DF::SurveillanceIdentityReply { fs, dr, um, id, ap } => todo!(),
-            adsb::DF::LongAirAir {
-                vs,
-                spare1,
-                sl,
-                spare2,
-                ri,
-                spare3,
-                altitude,
-                mv,
-                parity,
-            } => todo!(),
-            adsb::DF::TisB { cf, pi } => todo!(),
-            adsb::DF::ExtendedQuitterMilitaryApplication { af } => todo!(),
-            adsb::DF::ModeSExtendedSquitter {
-                df,
-                capability,
-                icao,
-                type_code,
-                adsb_data,
-                parity,
-            } => todo!("parse: {frame:?}"),
+            mode_s::Frame::ExtendedSquitterNonTransponder(
+                mode_s::ExtendedSquitterNonTransponder::AdsbWithIcaoAddress {
+                    address_announced,
+                    adsb_message,
+                    ..
+                },
+            ) => {
+                self.update_with_adsb(time, *address_announced, adsb_message);
+            }
+            mode_s::Frame::MilitaryExtendedSquitter(mode_s::MilitaryExtendedSquitter::Adsb {
+                address_announced,
+                adsb_message,
+                ..
+            }) => {
+                self.update_with_adsb(time, *address_announced, adsb_message);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn update_with_adsb(
+        &mut self,
+        time: DateTime<Utc>,
+        icao_address: IcaoAddress,
+        message: &adsb::Message,
+    ) {
+        let mut aircraft = self.update_aircraft(icao_address, time);
+
+        match message {
+            adsb::Message::AircraftIdentification(aircraft_identification) => {
+                aircraft.update_aircraft_identification(aircraft_identification)
+            }
+            adsb::Message::AirbornePosition(airborne_position) => {
+                aircraft.update_airborne_position(airborne_position)
+            }
+            adsb::Message::AircraftStatus(aircraft_status) => {
+                aircraft.update_aircraft_status(aircraft_status)
+            }
             _ => {}
         }
     }
@@ -164,20 +144,26 @@ pub struct AircraftState {
 
     pub last_seen: Timestamped<()>,
 
-    pub callsign: Option<Timestamped<String>>,
+    pub callsign: Option<Timestamped<Callsign>>,
     pub squawk: Option<Timestamped<Squawk>>,
 
     pub position: Option<Timestamped<Position>>,
-    pub altitude_barometric: Option<Timestamped<u16>>,
-    pub altitude_gnss: Option<Timestamped<u16>>,
-    pub ground_speed: Option<Timestamped<GroundSpeed>>,
+
+    // in ft
+    pub altitude_barometric: Option<Timestamped<i32>>,
+
+    // in m
+    pub altitude_gnss: Option<Timestamped<i32>>,
+
+    // in kt
+    //pub ground_speed: Option<Timestamped<GroundSpeed>>,
     pub track: Option<Timestamped<f64>>,
     pub vertical_rate: Option<Timestamped<f64>>,
 
-    pub airborne_position_even: Option<adsb::Altitude>,
-    pub airborne_position_odd: Option<adsb::Altitude>,
+    pub airborne_position_even: Option<Timestamped<cpr::CprPosition>>,
+    pub airborne_position_odd: Option<Timestamped<cpr::CprPosition>>,
 
-    pub mode_s_packets: Vec<adsb::DF>,
+    pub frames: Vec<mode_s::Frame>,
 }
 
 impl AircraftState {
@@ -193,12 +179,12 @@ impl AircraftState {
             position: Default::default(),
             altitude_barometric: Default::default(),
             altitude_gnss: Default::default(),
-            ground_speed: Default::default(),
+            //ground_speed: Default::default(),
             track: Default::default(),
             vertical_rate: Default::default(),
             airborne_position_even: None,
             airborne_position_odd: None,
-            mode_s_packets: vec![],
+            frames: vec![],
         }
     }
 }
@@ -210,8 +196,8 @@ pub struct Position {
     pub source: PositionSource,
 }
 
-impl From<adsb::cpr::Position> for Position {
-    fn from(value: adsb::cpr::Position) -> Self {
+impl From<cpr::Position> for Position {
+    fn from(value: cpr::Position) -> Self {
         Self {
             latitude: value.latitude,
             longitude: value.longitude,
@@ -225,15 +211,6 @@ pub enum PositionSource {
     Adbs,
     Mlat,
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum AltitudeType {
-    Barometric,
-    Gnss,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GroundSpeed {}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Timestamped<T> {
@@ -280,70 +257,77 @@ impl<T> UpdateTimestamped<T> for Option<Timestamped<T>> {
 pub struct UpdateAircraftState<'a> {
     index: usize,
     state: &'a mut AircraftState,
-    by_callsign: &'a mut HashMap<String, usize>,
+    by_callsign: &'a mut HashMap<Callsign, usize>,
     by_squawk: &'a mut HashMap<Squawk, usize>,
     time: DateTime<Utc>,
 }
 
 impl<'a> UpdateAircraftState<'a> {
-    pub fn update_airborne_position(
-        &mut self,
-        position: &adsb::Altitude,
-        altitude_type: AltitudeType,
-    ) {
+    pub fn update_airborne_position(&mut self, airborne_position: &adsb::AirbornePosition) {
         // the transponder will transmit position data over 2 frames, alternating
         // between even and odd frames. so we need to buffer those.
-        match position.odd_flag {
-            adsb::CPRFormat::Even => self.state.airborne_position_even = Some(*position),
-            adsb::CPRFormat::Odd => self.state.airborne_position_odd = Some(*position),
+        match airborne_position.cpr.format {
+            cpr::CprFormat::Even => &mut self.state.airborne_position_even,
+            cpr::CprFormat::Odd => &mut self.state.airborne_position_odd,
         }
+        .update(self.time, airborne_position.cpr.position);
 
         // if we have both even and odd position frames, we can determine the exact
         // global position
+        // todo: if we already know its position, we can also use local decoding (e.g.
+        // if global fails)
         if let Some(pair) = self
             .state
             .airborne_position_even
             .as_ref()
             .zip(self.state.airborne_position_odd.as_ref())
         {
-            self.state.position.update(
-                self.time,
-                adsb::cpr::get_position(pair)
-                    .expect("cpr decoding failed unexpectedly")
-                    .into(),
-            );
+            let most_recent = if pair.0.last_update > pair.1.last_update {
+                cpr::CprFormat::Even
+            }
+            else {
+                cpr::CprFormat::Odd
+            };
+            if let Ok(position) =
+                cpr::decode_globally_unambigious(pair.0.value, pair.1.value, most_recent)
+            {
+                self.state.position.update(self.time, position.into());
+            }
         }
 
         // update altitude
-        if let Some(altitude) = position.alt {
-            match altitude_type {
-                AltitudeType::Barometric => {
-                    self.state.altitude_barometric.update(self.time, altitude);
+        if let Some(altitude) = airborne_position.altitude() {
+            match altitude.altitude_type {
+                adsb::AltitudeType::Barometric => {
+                    self.state
+                        .altitude_barometric
+                        .update(self.time, altitude.altitude);
                 }
-                AltitudeType::Gnss => {
-                    self.state.altitude_gnss.update(self.time, altitude);
+                adsb::AltitudeType::Gnss => {
+                    self.state
+                        .altitude_gnss
+                        .update(self.time, altitude.altitude);
                 }
             }
         }
     }
 
-    pub fn update_airborne_velocity(
-        &mut self,
-        time: DateTime<Utc>,
-        velocity: &adsb::adsb::AirborneVelocity,
-    ) {
+    pub fn update_airborne_velocity(&mut self, velocity: &adsb::AirborneVelocity) {
         todo!();
     }
 
-    pub fn update_aircraft_identification(&mut self, identification: &adsb::adsb::Identification) {
-        self.update_callsign(&identification.cn);
+    pub fn update_aircraft_identification(
+        &mut self,
+        identification: &adsb::AircraftIdentification,
+    ) {
+        self.update_callsign(identification.callsign.decode_permissive());
     }
 
-    pub fn update_callsign(&mut self, callsign: &str) {
-        update_timestamped_option_with_index_update::<String, str>(
+    pub fn update_callsign(&mut self, callsign: Callsign) {
+        update_timestamped_option_with_index_update::<Callsign, Callsign>(
             &mut self.state.callsign,
             self.time,
-            callsign,
+            &callsign,
             |old_callsign, new_callsign| {
                 if let Some(old_callsign) = old_callsign {
                     self.by_callsign.remove(old_callsign);
@@ -353,11 +337,15 @@ impl<'a> UpdateAircraftState<'a> {
         );
     }
 
-    pub fn update_aircraft_status(&mut self, status: &adsb::adsb::AircraftStatus) {
-        // note: i verified this by playing back a plane in adbs.lol's webinterface.
-        let squawk =
-            Squawk::from_u16_hex(status.squawk.try_into().expect("squawk more than 16 bits"));
-        self.update_squawk(squawk);
+    pub fn update_aircraft_status(&mut self, status: &adsb::AircraftStatus) {
+        match status {
+            adsb::AircraftStatus::EmergencyPriorityStatusAndModeACode(
+                adsb::EmergencyPriorityStatusAndModeACode { mode_a_code, .. },
+            ) => {
+                self.update_squawk(*mode_a_code);
+            }
+            _ => {}
+        }
     }
 
     pub fn update_squawk(&mut self, squawk: Squawk) {

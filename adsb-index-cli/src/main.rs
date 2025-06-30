@@ -1,7 +1,9 @@
 use std::{
+    collections::HashSet,
     fmt::Debug,
     path::PathBuf,
     pin::Pin,
+    time::Instant,
 };
 
 use adsb_index_api_client::ApiClient;
@@ -14,12 +16,16 @@ use adsb_index_api_server::{
         history::index_archive_day_from_directory,
         mode_s::{
             self,
+            adsb,
             util::gillham::decode_gillham_ac13,
         },
         sbs,
         tar1090_db::update_aircraft_db,
     },
-    tracker::Tracker,
+    tracker::{
+        Tracker,
+        state::State,
+    },
 };
 use adsb_index_api_types::{
     IcaoAddress,
@@ -27,6 +33,7 @@ use adsb_index_api_types::{
     flights::AircraftQuery,
     live::SubscriptionFilter,
 };
+use chrono::Utc;
 use clap::{
     Parser,
     Subcommand,
@@ -110,67 +117,54 @@ async fn main() -> Result<(), Error> {
             .await?;
         }
         Command::BeastClient(args) => {
-            //let mut state = State::default();
+            let mut state = State::default();
 
-            fn handle_data(data: &[u8]) {
+            let t_start = Instant::now();
+            let mut num_frames = 0;
+            let mut num_bytes = 0;
+
+            let mut handle_data = |data: &[u8]| {
                 //println!("length: {}", data.len());
-                let deku_frame = adsb_deku::Frame::from_bytes(data).unwrap();
 
-                let deku_ac13 = match &deku_frame.df {
-                    adsb_deku::DF::ShortAirAirSurveillance { altitude, .. } => Some(*altitude),
-                    adsb_deku::DF::LongAirAir { altitude, .. } => Some(*altitude),
-                    adsb_deku::DF::CommBAltitudeReply { alt, .. } => Some(*alt),
-                    adsb_deku::DF::SurveillanceAltitudeReply { ac, .. } => Some(*ac),
-                    _ => None,
-                };
+                //let deku_frame = adsb_deku::Frame::from_bytes(data).unwrap();
 
-                let Ok(modes_frame) = mode_s::Frame::decode(&mut &data[..])
-                else {
-                    return;
-                };
-                let modes_ac13 = match &modes_frame {
-                    mode_s::Frame::ShortAirAirSurveillance(mode_s::ShortAirAirSurveillance {
-                        altitude_code,
-                        ..
-                    }) => Some(*altitude_code),
-                    mode_s::Frame::SurveillanceAltitudeReply(
-                        mode_s::SurveillanceAltitudeReply { altitude_code, .. },
-                    ) => Some(*altitude_code),
-                    mode_s::Frame::CommBAltitudeReply(mode_s::CommBAltitudeReply {
-                        altitude_code,
-                        ..
-                    }) => Some(*altitude_code),
-                    _ => None,
-                };
+                let modes_frame = mode_s::Frame::decode_and_check_checksum(&mut &data[..]).unwrap();
 
-                match (deku_ac13, modes_ac13) {
-                    (Some(deku_ac13), Some(modes_ac13)) => {
-                        //println!("ac13 code: 0x{:04x} decoded: 0x{:04x}", modes_ac13.as_u16(),
-                        // decode_gillham_ac13(modes_ac13.as_u16()));
-                        // println!("deku: {deku_ac13:?}");
-                        //println!();
-                        println!("{}, {}", modes_ac13.as_u16(), deku_ac13.0);
+                state.update_with_mode_s(Utc::now(), &modes_frame);
+
+                match &modes_frame {
+                    mode_s::Frame::MilitaryExtendedSquitter(_military_extended_squitter) => {
+                        todo!("military: {modes_frame:#?}");
                     }
-                    (None, None) => {}
-                    _ => {
-                        println!("deku: {deku_frame:#?}");
-                        println!("modes: {modes_frame:#?}");
-                        panic!("different frames decoded")
-                    }
+                    _ => {}
                 }
 
-                //println!("modes: {modes_frame:#?}");
-            }
+                num_bytes += data.len();
+                num_frames += 1;
+            };
 
             args.run(beast::output::Reader::new, |_i, packet| {
                 match packet {
                     beast::output::OutputPacket::ModeAc { .. } => {}
-                    beast::output::OutputPacket::ModeSLong { data, .. } => handle_data(&data),
-                    beast::output::OutputPacket::ModeSShort { data, .. } => handle_data(&data),
+                    beast::output::OutputPacket::ModeSLong { data, .. } => {
+                        handle_data(&data);
+                    }
+                    beast::output::OutputPacket::ModeSShort { data, .. } => {
+                        handle_data(&data);
+                    }
                     _ => todo!("{packet:?}"),
                 }
             })
             .await?;
+
+            let t_elapsed = t_start.elapsed();
+            println!("{num_frames} frames and {num_bytes} bytes in {t_elapsed:?}");
+            let seconds = t_elapsed.as_secs_f32();
+            println!(
+                "{} frames/s, {} MB/s",
+                num_frames as f32 / seconds,
+                num_bytes as f32 / seconds / 1024.0 / 1024.0
+            )
         }
     }
 

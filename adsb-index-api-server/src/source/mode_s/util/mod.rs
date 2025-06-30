@@ -1,5 +1,7 @@
 pub mod gillham;
 
+use bytes::Buf;
+
 use crate::source::mode_s::{
     AltitudeCode,
     DownlinkRequest,
@@ -11,6 +13,7 @@ use crate::source::mode_s::{
     cpr::{
         Cpr,
         CprFormat,
+        CprPosition,
         CprValue,
     },
 };
@@ -90,22 +93,23 @@ pub fn decode_air_air_surveillance_common_fields(
 ///
 /// This is useful for decoding surveillance replies and air air surveillance
 /// frames.
-fn decode_frame_aligned_altitude_or_identity_code(bytes: &[u8]) -> u16 {
+pub fn decode_frame_aligned_altitude_or_identity_code(bytes: &[u8]) -> u16 {
     (u16::from(bytes[0] & 0b00011111) << 8) | u16::from(bytes[1])
 }
 
 /// Decode CPR from a frame.
 ///
-/// This expects the CPR latitude and longitude to start in `bytes[0]`` bit 6
+/// This expects the CPR latitude and longitude to start at bit 6 in `bytes[0]`.
+/// A total of 5 bytes are required.
 ///
 /// ```plain
 /// byte         0        1        2        3        4
 /// bit   01234567 01234567 01234567 01234567 01234567
 /// value ......aa aaaaaaaa aaaaaaab bbbbbbbb bbbbbbbb
 /// ```
-pub fn decode_frame_aligned_encoded_position(bytes: &[u8]) -> (CprFormat, Cpr) {
+pub fn decode_frame_aligned_cpr(bytes: &[u8]) -> Cpr {
     let format = CprFormat::from_bool(bytes[0] & 0b00000100 != 0);
-    let cpr = Cpr {
+    let position = CprPosition {
         latitude: CprValue::from_u32_unchecked(
             (u32::from(bytes[0] & 0b10) << 15)
                 | (u32::from(bytes[1]) << 7)
@@ -115,5 +119,42 @@ pub fn decode_frame_aligned_encoded_position(bytes: &[u8]) -> (CprFormat, Cpr) {
             (u32::from(bytes[2] & 0b1) << 16) | (u32::from(bytes[3]) << 8) | u32::from(bytes[4]),
         ),
     };
-    (format, cpr)
+    Cpr { format, position }
+}
+
+/// CRC algorithm for Mode-S
+///
+/// <https://www.ll.mit.edu/sites/default/files/publication/doc/2018-12/Gertz_1984_ATC-117_WW-15318.pdf>
+pub const CRC_24_MODES: crc::Algorithm<u32> = crc::Algorithm {
+    width: 24,
+    poly: 0xfff409,
+    init: 0,
+    refin: false,
+    refout: false,
+    xorout: 0x000000,
+    check: 0x54268,
+    residue: 0x000000,
+};
+
+/// Wraps a [`Buf`][bytes::Buf] that calculates the CRC checksum of the read
+/// data.
+pub struct CrcBuf<'a, B> {
+    pub inner: B,
+    pub digest: crc::Digest<'a, u32>,
+}
+
+impl<'a, B: Buf> Buf for CrcBuf<'a, B> {
+    fn remaining(&self) -> usize {
+        self.inner.remaining()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.inner.chunk()
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        let chunk = &self.inner.chunk()[..cnt];
+        self.digest.update(chunk);
+        self.inner.advance(cnt);
+    }
 }

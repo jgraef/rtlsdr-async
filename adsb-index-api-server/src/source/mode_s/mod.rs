@@ -1,6 +1,10 @@
 //! Mode S frame decoder
 //!
-//! [Reference][1] (page 39 ff), [The 1090 Megaherrtz Riddle][2]
+//! - [ADS-B Reference][1] (page 39 ff) - this defines all the ADS-B messages
+//!   and related Mode-S DFs
+//! - [The 1090 Megaherrtz Riddle][2] - good overview
+//! - [Annex 10 to the Convetion on International Civil Aviation][3] -
+//!   specifications on Mode A/C/S in general
 //!
 //! # Notes
 //!
@@ -9,6 +13,7 @@
 //!
 //! [1]: http://www.anteni.net/adsb/Doc/1090-WP30-18-DRAFT_DO-260B-V42.pdf
 //! [2]: https://mode-s.org/1090mhz/content/mode-s/1-basics.html
+//! [3]: https://applications.icao.int/tools/ATMiKIT/story_content/external_files/story_content/external_files/Annex10_Volume%204_cons.pdf
 
 pub mod acas;
 pub mod adsb;
@@ -26,6 +31,8 @@ use bytes::Buf;
 
 use crate::{
     source::mode_s::util::{
+        CRC_24_MODES,
+        CrcBuf,
         decode_air_air_surveillance_common_fields,
         decode_surveillance_reply_body,
         gillham::{
@@ -61,12 +68,8 @@ pub enum DecodeError {
         buffer_length: usize,
     },
 
-    #[error("invalid byte in callsign encoding: 0x{invalid_byte:02x}")]
-    InvalidCallsign { encoding: [u8; 6], invalid_byte: u8 },
-
-    #[error("todo")]
-    #[deprecated]
-    Todo,
+    #[error("CRC check failed")]
+    CrcCheckFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,15 +88,19 @@ pub enum Frame {
 }
 
 impl Frame {
-    pub fn decode<B: Buf>(buffer: &mut B) -> Result<Self, DecodeError> {
+    /// Decodes a Mode-S frame.
+    ///
+    /// This doesn't verify the checksum.
+    pub fn decode<B: Buf>(buffer: &mut B) -> Result<Frame, DecodeError> {
         let buffer_length = buffer.remaining();
+
         let byte_0 = buffer.try_get_u8().map_err(|_| DecodeError::NoDf)?;
 
         let bits_1_to_5 = byte_0 >> 3;
+        let bits_6_to_8 = byte_0 & 0b111;
         let df = DownlinkFormat::from_u8(bits_1_to_5)?;
 
-        let bits_6_to_8 = byte_0 & 0b111;
-
+        // check that the buffer contains enough data
         let expected_length = df.frame_length();
         if buffer_length < expected_length {
             return Err(DecodeError::Truncated {
@@ -102,6 +109,11 @@ impl Frame {
             });
         }
 
+        // create a new buffer that is limited to the length of the frame
+        let mut buffer = buffer.take(expected_length - 1);
+        let buffer = &mut buffer;
+
+        // decode the DF
         let frame = match df {
             DownlinkFormat::ShortAirAirSurveillance => {
                 Self::ShortAirAirSurveillance(ShortAirAirSurveillance::decode(buffer, bits_6_to_8))
@@ -125,8 +137,7 @@ impl Frame {
                 Self::LongAirAirSurveillance(LongAirAirSurveillance::decode(buffer, bits_6_to_8))
             }
             DownlinkFormat::ExtendedSquitter => {
-                //Self::ExtendedSquitter(ExtendedSquitter::decode(buffer, bits_6_to_8)?)
-                return Err(DecodeError::Todo);
+                Self::ExtendedSquitter(ExtendedSquitter::decode(buffer, bits_6_to_8)?)
             }
             DownlinkFormat::ExtendedSquitterNonTransponder => {
                 Self::ExtendedSquitterNonTransponder(ExtendedSquitterNonTransponder::decode(
@@ -146,10 +157,55 @@ impl Frame {
             DownlinkFormat::CommBIdentityReply => {
                 Self::CommBIdentityReply(CommBIdentityReply::decode(buffer, bits_6_to_8))
             }
-            DownlinkFormat::CommD => return Err(DecodeError::Todo),
+            DownlinkFormat::CommD => {
+                // todo
+                Self::CommD(CommD {
+                    data: buffer.get_bytes(),
+                })
+            }
         };
 
+        let remaining = buffer.remaining();
+        if remaining > 0 {
+            todo!("fixme: {remaining} bytes remaining in buffer: {frame:?}");
+        }
+
         Ok(frame)
+    }
+
+    /// Decodes a Mode-S frame and calculates its CRC checksum.
+    pub fn decode_and_calculate_checksum<B: Buf>(
+        buffer: &mut B,
+    ) -> Result<FrameWithChecksum, DecodeError> {
+        const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&CRC_24_MODES);
+
+        let mut buffer = CrcBuf {
+            inner: buffer,
+            digest: CRC.digest(),
+        };
+
+        let frame = Self::decode(&mut buffer)?;
+
+        let checksum = buffer.digest.finalize().to_be_bytes();
+        assert_eq!(checksum[0], 0);
+        let checksum = Checksum([checksum[1], checksum[2], checksum[3]]);
+
+        Ok(FrameWithChecksum { frame, checksum })
+    }
+
+    /// Decodes a Mode-S frame.
+    ///
+    /// This performs a CRC check if possible and returns an error if it fails.
+    /// If you want to decode invalid Mode-S frames, or need the CRC checksum
+    /// use [`decode_with_checksum`][Self::decode_and_calculate_checksum]
+    pub fn decode_and_check_checksum<B: Buf>(buffer: &mut B) -> Result<Self, DecodeError> {
+        let frame = Self::decode_and_calculate_checksum(buffer)?;
+
+        if !frame.check().unwrap_or(true) {
+            return Err(DecodeError::CrcCheckFailed);
+        }
+
+        Ok(frame.frame)
     }
 
     pub fn downlink_format(&self) -> DownlinkFormat {
@@ -172,6 +228,66 @@ impl Frame {
 
     pub fn length(&self) -> usize {
         self.downlink_format().frame_length()
+    }
+
+    /// Returns address announced and ADS-B message
+    pub fn adsb(&self) -> Option<(&IcaoAddress, &adsb::Message)> {
+        match self {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                address_announced,
+                adsb_message,
+                ..
+            })
+            | Frame::ExtendedSquitterNonTransponder(
+                ExtendedSquitterNonTransponder::AdsbWithIcaoAddress {
+                    address_announced,
+                    adsb_message,
+                    ..
+                },
+            )
+            | Frame::ExtendedSquitterNonTransponder(
+                ExtendedSquitterNonTransponder::AdsbWithNonIcaoAddress {
+                    address_announced,
+                    adsb_message,
+                    ..
+                },
+            )
+            | Frame::ExtendedSquitterNonTransponder(
+                ExtendedSquitterNonTransponder::AdsbRebroadcast {
+                    address_announced,
+                    adsb_message,
+                    ..
+                },
+            )
+            | Frame::MilitaryExtendedSquitter(MilitaryExtendedSquitter::Adsb {
+                address_announced,
+                adsb_message,
+                ..
+            }) => Some((address_announced, adsb_message)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameWithChecksum {
+    pub frame: Frame,
+    pub checksum: Checksum,
+}
+
+impl FrameWithChecksum {
+    /// Tries to check if the frame is not corrupted.
+    ///
+    /// This is only possible for some downlink types (e.g. ADS-B), because some
+    /// overlay the parity with other data.
+    pub fn check(&self) -> Option<bool> {
+        match &self.frame {
+            Frame::AllCallReply(_)
+            | Frame::ExtendedSquitter(_)
+            | Frame::ExtendedSquitterNonTransponder(_)
+            | Frame::MilitaryExtendedSquitter(_) => Some(self.checksum.check()),
+            _ => None,
+        }
     }
 }
 
@@ -586,7 +702,7 @@ impl Debug for InterrogatorReservationType {
     }
 }
 
-/// 13-bit altitude code
+/// 13-bit altitude / Mode C code
 ///
 /// <https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html>
 /// <http://www.aeroelectric.com/articles/Altitude_Encoding/modec.htm>
@@ -611,9 +727,11 @@ impl AltitudeCode {
         self.0
     }
 
-    pub fn decode(&self) -> Option<DecodedAltitude> {
+    pub fn decode(&self) -> Option<Altitude> {
         // note: 11 bits altitude with 25 feet resolution and -1000 feet offset gives a
         // max value of 50175, so we need a i32 for the decoded altitude
+
+        // todo: adsb_deku considers AC=0 and AC=0x1fff to be invalid, but is it?
         if self.0 == 0 || self.0 == 0b0001111111111111 {
             None
         }
@@ -621,7 +739,7 @@ impl AltitudeCode {
             let m_bit = self.0 & 0b0000001000000 != 0;
             let q_bit = self.0 & 0b0000000010000 != 0;
 
-            let plain_altitude = || {
+            let remove_q_bit = || {
                 i32::from(
                     ((self.0 & 0b1111110000000) >> 2)
                         | ((self.0 & 0b0000000100000) >> 1)
@@ -630,20 +748,21 @@ impl AltitudeCode {
             };
 
             if m_bit {
-                Some(DecodedAltitude {
-                    altitude: plain_altitude(),
+                Some(Altitude {
+                    altitude: remove_q_bit(),
                     unit: AltitudeUnit::Meter,
                 })
             }
             else if q_bit {
-                Some(DecodedAltitude {
-                    altitude: 25 * plain_altitude() - 1000,
+                Some(Altitude {
+                    altitude: 25 * remove_q_bit() - 1000,
                     unit: AltitudeUnit::Feet,
                 })
             }
             else {
-                Some(DecodedAltitude {
-                    altitude: 100 * i32::from(decode_gillham_ac13(self.0)) - 1200,
+                let value = i32::from(decode_gillham_ac13(self.0));
+                Some(Altitude {
+                    altitude: 100 * value - 1200,
                     unit: AltitudeUnit::Feet,
                 })
             }
@@ -668,7 +787,7 @@ impl Debug for AltitudeCode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DecodedAltitude {
+pub struct Altitude {
     pub altitude: i32,
     pub unit: AltitudeUnit,
 }
@@ -688,7 +807,7 @@ impl AltitudeUnit {
     }
 }
 
-/// 13-bit identity code
+/// 13-bit identity / Mode A code
 /// <https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html>
 /// <http://www.aeroelectric.com/articles/Altitude_Encoding/modec.htm>
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -706,6 +825,10 @@ impl IdentityCode {
         else {
             None
         }
+    }
+
+    pub const fn from_bytes(bytes: [u8; 2]) -> Option<Self> {
+        Self::from_u16(u16::from_be_bytes(bytes))
     }
 
     pub fn as_u16(&self) -> u16 {
@@ -813,8 +936,50 @@ impl Debug for ReplyInformation {
     }
 }
 
+/// Regular parity of a frame.
+///
+/// This has no use other than that it causes the checksum of the frame to be 0
+/// for non-corrupted frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parity(pub [u8; 3]);
+
+/// Adress parity
+///
+/// This is a regular parity overlayed (XOR) with an ICAO address. Assuming the
+/// frame was received uncorrupted, we can recover the address from this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AddressParity(pub [u8; 3]);
+
+impl AddressParity {
+    /// The
+    pub fn recover_address(&self, frame_checksum: &Checksum) -> IcaoAddress {
+        IcaoAddress::from_bytes([
+            self.0[0] ^ frame_checksum.0[0],
+            self.0[1] ^ frame_checksum.0[1],
+            self.0[2] ^ frame_checksum.0[2],
+        ])
+    }
+}
+
+/// The checksum of a frame.
+///
+/// This can be calculated while reading a whole frame with
+/// [`Frame::decode_with_checksum`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Checksum(pub [u8; 3]);
+
+impl Checksum {
+    pub const VALID: Self = Self([0, 0, 0]);
+
+    /// Checks the parity.
+    ///
+    /// For frames in which contain non-overlayed (i.e. no address/data parity),
+    /// the expected checksum is 0. If it's not zero the frame might be
+    /// corrupted.
+    pub fn check(&self) -> bool {
+        *self == Self::VALID
+    }
+}
 
 /// <https://mode-s.org/1090mhz/content/mode-s/4-acas.html>
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -824,7 +989,7 @@ pub struct ShortAirAirSurveillance {
     pub sensitivity_level: SensitivityLevel,
     pub reply_information: ReplyInformation,
     pub altitude_code: AltitudeCode,
-    pub address_parity: Parity,
+    pub address_parity: AddressParity,
 }
 
 impl ShortAirAirSurveillance {
@@ -838,7 +1003,7 @@ impl ShortAirAirSurveillance {
             sensitivity_level,
             reply_information,
             altitude_code,
-            address_parity: Parity(buffer.get_bytes()),
+            address_parity: AddressParity(buffer.get_bytes()),
         }
     }
 }
@@ -851,7 +1016,7 @@ pub struct LongAirAirSurveillance {
     pub reply_information: ReplyInformation,
     pub altitude_code: AltitudeCode,
     pub message: [u8; 7], // todo
-    pub address_parity: Parity,
+    pub address_parity: AddressParity,
 }
 
 impl LongAirAirSurveillance {
@@ -865,7 +1030,7 @@ impl LongAirAirSurveillance {
             reply_information,
             altitude_code,
             message: buffer.get_bytes(),
-            address_parity: Parity(buffer.get_bytes()),
+            address_parity: AddressParity(buffer.get_bytes()),
         }
     }
 }
@@ -876,7 +1041,7 @@ pub struct SurveillanceAltitudeReply {
     pub downlink_request: DownlinkRequest,
     pub utility_message: UtilityMessage,
     pub altitude_code: AltitudeCode,
-    pub address_parity: Parity,
+    pub address_parity: AddressParity,
 }
 
 impl SurveillanceAltitudeReply {
@@ -888,7 +1053,7 @@ impl SurveillanceAltitudeReply {
             downlink_request,
             utility_message,
             altitude_code: AltitudeCode(code),
-            address_parity: Parity(buffer.get_bytes()),
+            address_parity: AddressParity(buffer.get_bytes()),
         }
     }
 }
@@ -899,7 +1064,7 @@ pub struct SurveillanceIdentityReply {
     pub downlink_request: DownlinkRequest,
     pub utility_message: UtilityMessage,
     pub identity_code: IdentityCode,
-    pub address_parity: Parity,
+    pub address_parity: AddressParity,
 }
 
 impl SurveillanceIdentityReply {
@@ -911,7 +1076,7 @@ impl SurveillanceIdentityReply {
             downlink_request,
             utility_message,
             identity_code: IdentityCode(code),
-            address_parity: Parity(buffer.get_bytes()),
+            address_parity: AddressParity(buffer.get_bytes()),
         }
     }
 }
@@ -975,7 +1140,7 @@ pub enum ExtendedSquitterNonTransponder {
         parity_interrogator: Parity,
     },
     TisbAndAdsrManagement {
-        data: [u8; 7],
+        data: [u8; 10],
         parity_interrogator: Parity,
     },
     TisbWithNonIcaoAddress {
@@ -983,25 +1148,13 @@ pub enum ExtendedSquitterNonTransponder {
         tisb_message: tisb::Message,
         parity_interrogator: Parity,
     },
-    /// ADS-R rebroad
-    ///
-    /// 2.2.18.4 ([Reference][1] page 289 ff)
-    ///
-    /// # TODO
-    ///
-    /// Identify the ICAO/Mode A Flag (IMF) - i think it's in the ME field
-    /// - IMF=0 -> rebroadcast is identified by 24bit ICAO address
-    /// - IMF=1 -> rebroadcast data is identified by an anonymous 24-bit address
-    ///   or ground vehicle address or fixed obstruction address
-    /// Otherwise this is a normal [adsb::Message]
-    ///
-    /// [1]: http://www.anteni.net/adsb/Doc/1090-WP30-18-DRAFT_DO-260B-V42.pdf
-    AdsrRebroadcast {
-        data: [u8; 7],
+    AdsbRebroadcast {
+        address_announced: IcaoAddress,
+        adsb_message: adsb::Message,
         parity_interrogator: Parity,
     },
     Reserved {
-        data: [u8; 7],
+        data: [u8; 10],
         parity_interrogator: Parity,
     },
 }
@@ -1027,7 +1180,7 @@ impl ExtendedSquitterNonTransponder {
             ExtendedSquitterNonTransponder::TisbWithNonIcaoAddress { .. } => {
                 CodeFormat::TISB_WITH_NON_ICAO_ADDRESS
             }
-            ExtendedSquitterNonTransponder::AdsrRebroadcast { .. } => CodeFormat::ADSB_REBROADCAST,
+            ExtendedSquitterNonTransponder::AdsbRebroadcast { .. } => CodeFormat::ADSB_REBROADCAST,
             ExtendedSquitterNonTransponder::Reserved { .. } => CodeFormat::RESERVED,
         }
     }
@@ -1062,20 +1215,22 @@ impl ExtendedSquitterNonTransponder {
             }
             CodeFormat::TISB_WITH_ICAO_ADDRESS2 => {
                 // todo: not always valid icao address, see 2.2.3.2.1.5
-                ExtendedSquitterNonTransponder::TisbWithIcaoAddress1 {
+                ExtendedSquitterNonTransponder::TisbWithIcaoAddress2 {
                     address_announced: IcaoAddress::from_bytes(buffer.get_bytes()),
                     tisb_message: tisb::Message::decode(buffer)?,
                     parity_interrogator: Parity(buffer.get_bytes()),
                 }
             }
             CodeFormat::TISB_AND_ADSR_MANAGEMENT => {
+                // format not specified in 1090 MOPS. it seems to exist, but i can't find
+                // information on it.
                 ExtendedSquitterNonTransponder::TisbAndAdsrManagement {
                     data: buffer.get_bytes(),
                     parity_interrogator: Parity(buffer.get_bytes()),
                 }
             }
             CodeFormat::TISB_WITH_NON_ICAO_ADDRESS => {
-                ExtendedSquitterNonTransponder::TisbWithIcaoAddress1 {
+                ExtendedSquitterNonTransponder::TisbWithNonIcaoAddress {
                     address_announced: IcaoAddress::from_bytes(buffer.get_bytes())
                         .with_non_icao_flag(),
                     tisb_message: tisb::Message::decode(buffer)?,
@@ -1083,8 +1238,16 @@ impl ExtendedSquitterNonTransponder {
                 }
             }
             CodeFormat::ADSB_REBROADCAST => {
-                ExtendedSquitterNonTransponder::AdsrRebroadcast {
-                    data: buffer.get_bytes(),
+                // todo: almost same message format as DF=17, but some bits modified (see
+                // 2.2.18)
+                //
+                // Identify the ICAO/Mode A Flag (IMF)
+                // - IMF=0 -> rebroadcast is identified by 24bit ICAO address
+                // - IMF=1 -> rebroadcast data is identified by an anonymous 24-bit address or
+                //   ground vehicle address or fixed obstruction address
+                ExtendedSquitterNonTransponder::AdsbRebroadcast {
+                    address_announced: IcaoAddress::from_bytes(buffer.get_bytes()),
+                    adsb_message: adsb::Message::decode(buffer)?,
                     parity_interrogator: Parity(buffer.get_bytes()),
                 }
             }
@@ -1106,6 +1269,7 @@ pub enum MilitaryExtendedSquitter {
     Adsb {
         address_announced: IcaoAddress,
         adsb_message: adsb::Message,
+        parity_interrogator: Parity,
     },
     /// Reserved for military applications
     Reserved {
@@ -1124,6 +1288,7 @@ impl MilitaryExtendedSquitter {
             Ok(Self::Adsb {
                 address_announced: IcaoAddress::from_bytes(buffer.get_bytes()),
                 adsb_message: adsb::Message::decode(buffer)?,
+                parity_interrogator: Parity(buffer.get_bytes()),
             })
         }
         else {
@@ -1142,7 +1307,7 @@ pub struct CommBAltitudeReply {
     pub utility_message: UtilityMessage,
     pub altitude_code: AltitudeCode,
     pub message: [u8; 7], // todo
-    pub address_parity: Parity,
+    pub data_parity: Parity,
 }
 
 impl CommBAltitudeReply {
@@ -1155,7 +1320,7 @@ impl CommBAltitudeReply {
             utility_message,
             altitude_code: AltitudeCode(code),
             message: buffer.get_bytes(),
-            address_parity: Parity(buffer.get_bytes()),
+            data_parity: Parity(buffer.get_bytes()),
         }
     }
 }
@@ -1167,7 +1332,7 @@ pub struct CommBIdentityReply {
     pub utility_message: UtilityMessage,
     pub identity_code: IdentityCode,
     pub message: [u8; 7], // todo
-    pub address_parity: Parity,
+    pub data_parity: Parity,
 }
 
 impl CommBIdentityReply {
@@ -1180,13 +1345,16 @@ impl CommBIdentityReply {
             utility_message,
             identity_code: IdentityCode(code),
             message: buffer.get_bytes(),
-            address_parity: Parity(buffer.get_bytes()),
+            data_parity: Parity(buffer.get_bytes()),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CommD;
+pub struct CommD {
+    // todo
+    pub data: [u8; 6],
+}
 
 #[cfg(test)]
 mod tests {

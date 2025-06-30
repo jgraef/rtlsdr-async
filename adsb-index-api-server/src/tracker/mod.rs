@@ -16,11 +16,11 @@ use crate::{
     api::live::ClientId,
     source::{
         SourceId,
-        adsb_deku as adsb,
         beast::{
             self,
             MlatTimestamp,
         },
+        mode_s,
         sbs,
     },
     tracker::{
@@ -279,9 +279,9 @@ impl Reactor {
             todo!("parse beast::MlatTimestamp");
         };
 
-        match adsb::Frame::from_bytes(data) {
+        match mode_s::Frame::decode(&mut &data[..]) {
             Ok(frame) => {
-                self.state.update_with_modes_frame(time, &frame);
+                self.state.update_with_mode_s(time, &frame);
             }
             Err(error) => {
                 tracing::error!(?error);

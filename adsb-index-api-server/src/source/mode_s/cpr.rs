@@ -1,4 +1,13 @@
-pub use crate::source::mode_s::cpr::decode::decode_globally_unambigious;
+pub use crate::source::mode_s::cpr::decode::{
+    decode_globally_unambigious,
+    decode_locally_umambiguous,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cpr {
+    pub format: CprFormat,
+    pub position: CprPosition,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CprFormat {
@@ -20,7 +29,7 @@ impl CprFormat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Cpr {
+pub struct CprPosition {
     pub latitude: CprValue,
     pub longitude: CprValue,
 }
@@ -49,7 +58,7 @@ impl CprValue {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct DecodedPosition {
+pub struct Position {
     pub latitude: f64,
     pub longitude: f64,
 }
@@ -73,8 +82,9 @@ mod decode {
         Cpr,
         CprDecodeError,
         CprFormat,
+        CprPosition,
         CprValue,
-        DecodedPosition,
+        Position,
     };
 
     const N_Z: f64 = 15.0;
@@ -104,7 +114,7 @@ mod decode {
 
     /// scale cpr latitude longitude to a fraction [0, 1]
     #[inline(always)]
-    fn cpr(x: CprValue) -> f64 {
+    fn lat_lon_cpr(x: CprValue) -> f64 {
         (x.0 as f64) / 131072.0
     }
 
@@ -116,12 +126,12 @@ mod decode {
     }
 
     pub fn decode_globally_unambigious(
-        cpr_even: Cpr,
-        cpr_odd: Cpr,
+        cpr_even: CprPosition,
+        cpr_odd: CprPosition,
         most_recent: CprFormat,
-    ) -> Result<DecodedPosition, CprDecodeError> {
-        let lat_cpr_even = cpr(cpr_even.latitude);
-        let lat_cpr_odd = cpr(cpr_odd.latitude);
+    ) -> Result<Position, CprDecodeError> {
+        let lat_cpr_even = lat_lon_cpr(cpr_even.latitude);
+        let lat_cpr_odd = lat_lon_cpr(cpr_odd.latitude);
 
         // latitude zone index
         let j = (59.0 * lat_cpr_even - 60.0 * lat_cpr_odd + 0.5).floor();
@@ -147,8 +157,8 @@ mod decode {
             CprFormat::Odd => (lat_odd, nl_lat_odd),
         };
 
-        let lon_cpr_even = cpr(cpr_even.longitude);
-        let lon_cpr_odd = cpr(cpr_odd.longitude);
+        let lon_cpr_even = lat_lon_cpr(cpr_even.longitude);
+        let lon_cpr_odd = lat_lon_cpr(cpr_odd.longitude);
 
         // longitude index
         let m = (lon_cpr_even * (nl_lat - 1.0) - lon_cpr_odd * nl_lat + 0.5).floor();
@@ -173,10 +183,44 @@ mod decode {
             lon -= 360.0;
         }
 
-        Ok(DecodedPosition {
+        Ok(Position {
             latitude: lat,
             longitude: lon,
         })
+    }
+
+    pub fn decode_locally_umambiguous(field: Cpr, reference_position: &Position) -> Position {
+        let i = match field.format {
+            CprFormat::Even => 0.0,
+            CprFormat::Odd => 1.0,
+        };
+
+        let lat_ref = reference_position.latitude;
+        let lon_ref = reference_position.longitude;
+
+        let lat_cpr = lat_lon_cpr(field.position.latitude);
+        let lon_cpr = lat_lon_cpr(field.position.longitude);
+
+        let d_lat = 360.0 / (4.0 * N_Z - i);
+
+        // latitude zone index
+        let j =
+            (lat_ref / d_lat).floor() + (lat_ref.rem_euclid(d_lat) / d_lat - lat_cpr + 0.5).floor();
+
+        let lat = d_lat * (j + lat_cpr);
+
+        let d_lon = 360.0 / (n_l(lat) - i).max(1.0);
+
+        // longitude zone index
+        let m =
+            (lon_ref / d_lon).floor() + (lon_ref.rem_euclid(d_lon) / d_lon - lon_cpr + 0.5).floor();
+
+        let lon = d_lon * (m + lon_cpr);
+
+        Position {
+            latitude: lat,
+            longitude: lon,
+        }
     }
 }
 
@@ -187,26 +231,52 @@ mod tests {
     use crate::source::mode_s::cpr::{
         Cpr,
         CprFormat,
+        CprPosition,
         CprValue,
-        DecodedPosition,
+        Position,
+        decode::decode_locally_umambiguous,
         decode_globally_unambigious,
     };
 
     #[test]
     fn decode_globally_unambigious_decoding_example() {
-        let cpr_even = Cpr {
+        let cpr_even = CprPosition {
             latitude: CprValue::from_u32_unchecked(0b10110101101001000),
             longitude: CprValue::from_u32_unchecked(0b01100100010101100),
         };
-        let cpr_odd = Cpr {
+        let cpr_odd = CprPosition {
             latitude: CprValue::from_u32_unchecked(0b10010000110101110),
             longitude: CprValue::from_u32_unchecked(0b01100010000010010),
         };
 
-        let DecodedPosition {
+        let Position {
             latitude,
             longitude,
         } = decode_globally_unambigious(cpr_even, cpr_odd, CprFormat::Even).unwrap();
+
+        assert_abs_diff_eq!(latitude, 52.2572, epsilon = 0.001);
+        assert_abs_diff_eq!(longitude, 3.91937, epsilon = 0.001);
+    }
+
+    #[test]
+    fn decode_locally_umambiguous_decoding_example() {
+        let cpr = Cpr {
+            format: CprFormat::Even,
+            position: CprPosition {
+                latitude: CprValue::from_u32_unchecked(0b10110101101001000),
+                longitude: CprValue::from_u32_unchecked(0b01100100010101100),
+            },
+        };
+
+        let reference_position = Position {
+            latitude: 52.258,
+            longitude: 3.918,
+        };
+
+        let Position {
+            latitude,
+            longitude,
+        } = decode_locally_umambiguous(cpr, &reference_position);
 
         assert_abs_diff_eq!(latitude, 52.2572, epsilon = 0.001);
         assert_abs_diff_eq!(longitude, 3.91937, epsilon = 0.001);

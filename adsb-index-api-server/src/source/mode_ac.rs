@@ -1,7 +1,12 @@
-use adsb_index_api_types::Squawk;
+//! <http://www.aeroelectric.com/articles/Altitude_Encoding/modec.htm>
+//!
+//! # TODO
+//!
+//! This seems to be the same as `super::mode_s::{IdentityCode, AltitudeCode}`,
+//! but we need to test this. Unfortunately the mode A frames in our test data
+//! are all zeros.
 
-// todo
-// good info: http://www.aeroelectric.com/articles/Altitude_Encoding/modec.htm
+use adsb_index_api_types::Squawk;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ModeAc {

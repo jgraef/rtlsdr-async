@@ -126,10 +126,14 @@ pub struct Squawk {
 }
 
 impl Squawk {
-    pub const VFR_STANDARD: Self = Self::from_u16_unchecked(0700);
-    pub const AIRCRAFT_HIJACKING: Self = Self::from_u16_unchecked(07500);
-    pub const RADIO_FAILURE: Self = Self::from_u16_unchecked(07600);
-    pub const EMERGENCY: Self = Self::from_u16_unchecked(07700);
+    /// 0700
+    pub const VFR_STANDARD: Self = Self::from_u16_unchecked(0o0700);
+    /// 7500
+    pub const AIRCRAFT_HIJACKING: Self = Self::from_u16_unchecked(0o7500);
+    /// 7600
+    pub const RADIO_FAILURE: Self = Self::from_u16_unchecked(0o7600);
+    /// 7700
+    pub const EMERGENCY: Self = Self::from_u16_unchecked(0o7700);
 
     pub const fn from_u16_unchecked(code: u16) -> Self {
         Self { code }
@@ -152,6 +156,10 @@ impl Squawk {
             | ((code & 0x0070) >> 1)
             | (code & 0x0007);
         Squawk::from_u16_unchecked(code)
+    }
+
+    pub fn as_u16(&self) -> u16 {
+        self.code
     }
 }
 
