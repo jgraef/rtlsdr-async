@@ -16,7 +16,7 @@ use crate::{
     api::live::ClientId,
     source::{
         SourceId,
-        adsb,
+        adsb_deku as adsb,
         beast::{
             self,
             MlatTimestamp,

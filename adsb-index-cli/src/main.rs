@@ -9,16 +9,17 @@ use adsb_index_api_server::{
     api::Api,
     database::Database,
     source::{
-        adsb,
+        adsb_deku,
         beast,
         history::index_archive_day_from_directory,
+        mode_s::{
+            self,
+            util::gillham::decode_gillham_ac13,
+        },
         sbs,
         tar1090_db::update_aircraft_db,
     },
-    tracker::{
-        Tracker,
-        state::State,
-    },
+    tracker::Tracker,
 };
 use adsb_index_api_types::{
     IcaoAddress,
@@ -26,7 +27,6 @@ use adsb_index_api_types::{
     flights::AircraftQuery,
     live::SubscriptionFilter,
 };
-use chrono::Utc;
 use clap::{
     Parser,
     Subcommand,
@@ -110,21 +110,65 @@ async fn main() -> Result<(), Error> {
             .await?;
         }
         Command::BeastClient(args) => {
-            let mut state = State::default();
+            //let mut state = State::default();
+
+            fn handle_data(data: &[u8]) {
+                //println!("length: {}", data.len());
+                let deku_frame = adsb_deku::Frame::from_bytes(data).unwrap();
+
+                let deku_ac13 = match &deku_frame.df {
+                    adsb_deku::DF::ShortAirAirSurveillance { altitude, .. } => Some(*altitude),
+                    adsb_deku::DF::LongAirAir { altitude, .. } => Some(*altitude),
+                    adsb_deku::DF::CommBAltitudeReply { alt, .. } => Some(*alt),
+                    adsb_deku::DF::SurveillanceAltitudeReply { ac, .. } => Some(*ac),
+                    _ => None,
+                };
+
+                let Ok(modes_frame) = mode_s::Frame::decode(&mut &data[..])
+                else {
+                    return;
+                };
+                let modes_ac13 = match &modes_frame {
+                    mode_s::Frame::ShortAirAirSurveillance(mode_s::ShortAirAirSurveillance {
+                        altitude_code,
+                        ..
+                    }) => Some(*altitude_code),
+                    mode_s::Frame::SurveillanceAltitudeReply(
+                        mode_s::SurveillanceAltitudeReply { altitude_code, .. },
+                    ) => Some(*altitude_code),
+                    mode_s::Frame::CommBAltitudeReply(mode_s::CommBAltitudeReply {
+                        altitude_code,
+                        ..
+                    }) => Some(*altitude_code),
+                    _ => None,
+                };
+
+                match (deku_ac13, modes_ac13) {
+                    (Some(deku_ac13), Some(modes_ac13)) => {
+                        //println!("ac13 code: 0x{:04x} decoded: 0x{:04x}", modes_ac13.as_u16(),
+                        // decode_gillham_ac13(modes_ac13.as_u16()));
+                        // println!("deku: {deku_ac13:?}");
+                        //println!();
+                        println!("{}, {}", modes_ac13.as_u16(), deku_ac13.0);
+                    }
+                    (None, None) => {}
+                    _ => {
+                        println!("deku: {deku_frame:#?}");
+                        println!("modes: {modes_frame:#?}");
+                        panic!("different frames decoded")
+                    }
+                }
+
+                //println!("modes: {modes_frame:#?}");
+            }
+
             args.run(beast::output::Reader::new, |_i, packet| {
-                let frame = match packet {
-                    beast::output::OutputPacket::ModeAc { .. } => return,
-                    beast::output::OutputPacket::ModeSLong { data, .. } => {
-                        adsb::Frame::from_bytes(&data)
-                    }
-                    beast::output::OutputPacket::ModeSShort { data, .. } => {
-                        adsb::Frame::from_bytes(&data)
-                    }
+                match packet {
+                    beast::output::OutputPacket::ModeAc { .. } => {}
+                    beast::output::OutputPacket::ModeSLong { data, .. } => handle_data(&data),
+                    beast::output::OutputPacket::ModeSShort { data, .. } => handle_data(&data),
                     _ => todo!("{packet:?}"),
                 }
-                .expect("invalid packet");
-                state.update_with_modes_frame(Utc::now(), &frame);
-                println!("{frame:?}");
             })
             .await?;
         }

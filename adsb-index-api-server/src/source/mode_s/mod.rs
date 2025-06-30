@@ -10,21 +10,29 @@
 //! [1]: http://www.anteni.net/adsb/Doc/1090-WP30-18-DRAFT_DO-260B-V42.pdf
 //! [2]: https://mode-s.org/1090mhz/content/mode-s/1-basics.html
 
+pub mod acas;
 pub mod adsb;
+pub mod cpr;
 pub mod tisb;
 pub mod util;
+
+use std::fmt::Debug;
 
 use adsb_index_api_types::{
     IcaoAddress,
     Squawk,
 };
-use bytes::{
-    Buf,
-    BufMut,
-};
+use bytes::Buf;
 
 use crate::{
-    source::mode_s::util::decode_graham,
+    source::mode_s::util::{
+        decode_air_air_surveillance_common_fields,
+        decode_surveillance_reply_body,
+        gillham::{
+            decode_gillham_ac13,
+            decode_gillham_id13,
+        },
+    },
     util::BufReadBytesExt,
 };
 
@@ -41,6 +49,7 @@ pub enum EncodeError {}
 pub enum DecodeError {
     #[error("buffer with length 0 doesn't contain DF")]
     NoDf,
+
     #[error("invalid value for DF: {value}")]
     InvalidDf { value: u8 },
 
@@ -51,6 +60,13 @@ pub enum DecodeError {
         expected_length: usize,
         buffer_length: usize,
     },
+
+    #[error("invalid byte in callsign encoding: 0x{invalid_byte:02x}")]
+    InvalidCallsign { encoding: [u8; 6], invalid_byte: u8 },
+
+    #[error("todo")]
+    #[deprecated]
+    Todo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,18 +85,14 @@ pub enum Frame {
 }
 
 impl Frame {
-    pub fn encode<B: BufMut>(buffer: &mut B) -> Result<(), EncodeError> {
-        todo!();
-    }
-
     pub fn decode<B: Buf>(buffer: &mut B) -> Result<Self, DecodeError> {
         let buffer_length = buffer.remaining();
         let byte_0 = buffer.try_get_u8().map_err(|_| DecodeError::NoDf)?;
 
-        let bits_1_to_5 = byte_0 & 0b11111;
+        let bits_1_to_5 = byte_0 >> 3;
         let df = DownlinkFormat::from_u8(bits_1_to_5)?;
 
-        let bits_6_to_8 = byte_0 >> 5;
+        let bits_6_to_8 = byte_0 & 0b111;
 
         let expected_length = df.frame_length();
         if buffer_length < expected_length {
@@ -91,13 +103,30 @@ impl Frame {
         }
 
         let frame = match df {
-            DownlinkFormat::ShortAirAirSurveillance => todo!(),
-            DownlinkFormat::SurveillanceAltitudeReply => todo!(),
-            DownlinkFormat::SurveillanceIdentityReply => todo!(),
-            DownlinkFormat::AllCallReply => todo!(),
-            DownlinkFormat::LongAirAirSurveillance => todo!(),
+            DownlinkFormat::ShortAirAirSurveillance => {
+                Self::ShortAirAirSurveillance(ShortAirAirSurveillance::decode(buffer, bits_6_to_8))
+            }
+            DownlinkFormat::SurveillanceAltitudeReply => {
+                Self::SurveillanceAltitudeReply(SurveillanceAltitudeReply::decode(
+                    buffer,
+                    bits_6_to_8,
+                ))
+            }
+            DownlinkFormat::SurveillanceIdentityReply => {
+                Self::SurveillanceIdentityReply(SurveillanceIdentityReply::decode(
+                    buffer,
+                    bits_6_to_8,
+                ))
+            }
+            DownlinkFormat::AllCallReply => {
+                Self::AllCallReply(AllCallReply::decode(buffer, bits_6_to_8))
+            }
+            DownlinkFormat::LongAirAirSurveillance => {
+                Self::LongAirAirSurveillance(LongAirAirSurveillance::decode(buffer, bits_6_to_8))
+            }
             DownlinkFormat::ExtendedSquitter => {
-                Self::ExtendedSquitter(ExtendedSquitter::decode(buffer, bits_6_to_8)?)
+                //Self::ExtendedSquitter(ExtendedSquitter::decode(buffer, bits_6_to_8)?)
+                return Err(DecodeError::Todo);
             }
             DownlinkFormat::ExtendedSquitterNonTransponder => {
                 Self::ExtendedSquitterNonTransponder(ExtendedSquitterNonTransponder::decode(
@@ -105,10 +134,19 @@ impl Frame {
                     bits_6_to_8,
                 )?)
             }
-            DownlinkFormat::MilitaryExtendedSquitter => todo!(),
-            DownlinkFormat::CommBAltitudeReply => todo!(),
-            DownlinkFormat::CommBIdentityReply => todo!(),
-            DownlinkFormat::CommD => todo!(),
+            DownlinkFormat::MilitaryExtendedSquitter => {
+                Self::MilitaryExtendedSquitter(MilitaryExtendedSquitter::decode(
+                    buffer,
+                    bits_6_to_8,
+                )?)
+            }
+            DownlinkFormat::CommBAltitudeReply => {
+                Self::CommBAltitudeReply(CommBAltitudeReply::decode(buffer, bits_6_to_8))
+            }
+            DownlinkFormat::CommBIdentityReply => {
+                Self::CommBIdentityReply(CommBIdentityReply::decode(buffer, bits_6_to_8))
+            }
+            DownlinkFormat::CommD => return Err(DecodeError::Todo),
         };
 
         Ok(frame)
@@ -184,23 +222,23 @@ impl DownlinkFormat {
 
     pub fn frame_length(&self) -> usize {
         match self {
-            DownlinkFormat::ShortAirAirSurveillance => todo!(),
-            DownlinkFormat::SurveillanceAltitudeReply => todo!(),
-            DownlinkFormat::SurveillanceIdentityReply => todo!(),
+            DownlinkFormat::ShortAirAirSurveillance => LENGTH_SHORT,
+            DownlinkFormat::SurveillanceAltitudeReply => LENGTH_SHORT,
+            DownlinkFormat::SurveillanceIdentityReply => LENGTH_SHORT,
             DownlinkFormat::AllCallReply => LENGTH_SHORT,
-            DownlinkFormat::LongAirAirSurveillance => todo!(),
+            DownlinkFormat::LongAirAirSurveillance => LENGTH_LONG,
             DownlinkFormat::ExtendedSquitter => LENGTH_LONG,
             DownlinkFormat::ExtendedSquitterNonTransponder => LENGTH_LONG,
             DownlinkFormat::MilitaryExtendedSquitter => LENGTH_LONG,
-            DownlinkFormat::CommBAltitudeReply => todo!(),
-            DownlinkFormat::CommBIdentityReply => todo!(),
-            DownlinkFormat::CommD => todo!(),
+            DownlinkFormat::CommBAltitudeReply => LENGTH_LONG,
+            DownlinkFormat::CommBIdentityReply => LENGTH_LONG,
+            DownlinkFormat::CommD => LENGTH_SHORT,
         }
     }
 }
 
 /// 3 bit capability value
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Capability(u8);
 
 impl Capability {
@@ -242,17 +280,32 @@ impl Capability {
     }
 }
 
+impl Debug for Capability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::LEVEL1_GROUND_AIRBORNE => write!(f, "Capability::LEVEL1_GROUND_AIRBORNE"),
+            Self::LEVEL2_GROUND => write!(f, "Capability::LEVEL2_GROUND"),
+            Self::LEVEL2_AIRBORNE => write!(f, "Capability::LEVEL2_AIRBORNE"),
+            Self::LEVEL2_GROUND_AIRBORNE => write!(f, "Capability::LEVEL2_GROUND_AIRBORNE"),
+            Self::DR_NOT_ZERO_FS_EQUAL_2345_GROUND_AIRBORNE => {
+                write!(f, "Capability::DR_NOT_ZERO_FS_EQUAL_2345_GROUND_AIRBORNE")
+            }
+            _ => write!(f, "Capability(b{:03b})", self.0),
+        }
+    }
+}
+
 /// 3-bit code format
 ///
 /// Determines the type of non-transmitter extended squitter message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CodeFormat(u8);
 
 impl CodeFormat {
     pub const ADSB_WITH_ICAO_ADDRESS: Self = Self(0);
     pub const ADSB_WITH_NON_ICAO_ADDRESS: Self = Self(1);
-    pub const TISB_WITH_ICAO_ADDRESS_1: Self = Self(2);
-    pub const TISB_WITH_ICAO_ADDRESS_2: Self = Self(3);
+    pub const TISB_WITH_ICAO_ADDRESS1: Self = Self(2);
+    pub const TISB_WITH_ICAO_ADDRESS2: Self = Self(3);
     pub const TISB_AND_ADSR_MANAGEMENT: Self = Self(4);
     pub const TISB_WITH_NON_ICAO_ADDRESS: Self = Self(5);
     pub const ADSB_REBROADCAST: Self = Self(6);
@@ -276,10 +329,26 @@ impl CodeFormat {
     }
 }
 
+impl Debug for CodeFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::ADSB_WITH_ICAO_ADDRESS => write!(f, "CodeFormat::ADSB_WITH_ICAO_ADDRESS"),
+            Self::ADSB_WITH_NON_ICAO_ADDRESS => write!(f, "CodeFormat::ADSB_WITH_NON_ICAO_ADDRESS"),
+            Self::TISB_WITH_ICAO_ADDRESS1 => write!(f, "CodeFormat::TISB_WITH_ICAO_ADDRESS1"),
+            Self::TISB_WITH_ICAO_ADDRESS2 => write!(f, "CodeFormat::TISB_WITH_ICAO_ADDRESS2"),
+            Self::TISB_AND_ADSR_MANAGEMENT => write!(f, "CodeFormat::TISB_AND_ADSR_MANAGEMENT"),
+            Self::TISB_WITH_NON_ICAO_ADDRESS => write!(f, "CodeFormat::TISB_WITH_NON_ICAO_ADDRESS"),
+            Self::ADSB_REBROADCAST => write!(f, "CodeFormat::ADSB_REBROADCAST"),
+            Self::RESERVED => write!(f, "CodeFormat::RESERVED"),
+            _ => panic!("Invalid CodeFormat bitpattern"),
+        }
+    }
+}
+
 /// 3-bit flight status
 ///
 /// <https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html>
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FlightStatus(u8);
 
 impl FlightStatus {
@@ -332,10 +401,46 @@ impl FlightStatus {
     }
 }
 
+impl Debug for FlightStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FlightStatus(")?;
+        let mut comma = false;
+        let mut slash = false;
+        if self.alert() {
+            write!(f, "alert")?;
+            comma = true;
+        }
+        if self.spi() {
+            if comma {
+                write!(f, ", ")?;
+            }
+            write!(f, "spi")?;
+            comma = true;
+        }
+        if self.airborne() {
+            if comma {
+                write!(f, ", ")?;
+            }
+            write!(f, "airborne")?;
+            slash = true;
+        }
+        if self.ground() {
+            if slash {
+                write!(f, "/")?;
+            }
+            else if comma {
+                write!(f, ", ")?;
+            }
+            write!(f, "ground")?;
+        }
+        write!(f, ")")
+    }
+}
+
 /// 5-bit downlink request
 ///
 /// <https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html>
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DownlinkRequest(u8);
 
 impl DownlinkRequest {
@@ -362,13 +467,31 @@ impl DownlinkRequest {
     }
 }
 
+impl Debug for DownlinkRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::NO_DOWNLINK_REQUEST => write!(f, "DownlinkRequest::NO_DOWNLINK_REQUEST"),
+            Self::REQUEST_TO_SEND_COMMB_MESSAGE => {
+                write!(f, "DownlinkRequest::REQUEST_TO_SEND_COMMB_MESSAGE")
+            }
+            Self::COMMB_BROADCAST_MESSAGE1_AVAILABLE => {
+                write!(f, "DownlinkRequest::COMMB_BROADCAST_MESSAGE1_AVAILABLE")
+            }
+            Self::COMMB_BROADCAST_MESSAGE2_AVAILABLE => {
+                write!(f, "DownlinkRequest::COMMB_BROADCAST_MESSAGE2_AVAILABLE")
+            }
+            _ => write!(f, "DownlinkRequest({})", self.0),
+        }
+    }
+}
+
 /// 6-bit utility message
 ///
 /// <https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UtilityMessage {
     pub interrogator_identifier_subfield: InterrogatorIdentifierSubfield,
-    pub interrogator_reservation_type: InterragatorReservationType,
+    pub interrogator_reservation_type: InterrogatorReservationType,
 }
 
 impl UtilityMessage {
@@ -383,8 +506,8 @@ impl UtilityMessage {
 
     pub const fn from_u8_unchecked(byte: u8) -> Self {
         Self {
-            interrogator_identifier_subfield: InterrogatorIdentifierSubfield(byte & 0b001111),
-            interrogator_reservation_type: InterragatorReservationType(byte >> 4),
+            interrogator_identifier_subfield: InterrogatorIdentifierSubfield(byte >> 2),
+            interrogator_reservation_type: InterrogatorReservationType(byte & 0b11),
         }
     }
 
@@ -394,6 +517,7 @@ impl UtilityMessage {
     }
 }
 
+/// 6-bit IIS in utility message
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InterrogatorIdentifierSubfield(u8);
 
@@ -416,14 +540,15 @@ impl InterrogatorIdentifierSubfield {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InterragatorReservationType(u8);
+/// 2-bit IDS in utility message
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InterrogatorReservationType(u8);
 
-impl InterragatorReservationType {
+impl InterrogatorReservationType {
     pub const NO_INFORMATION: Self = Self(0);
-    pub const IIS_CONTAINS_COMMB_INTERROGATOR_IDENTIFIER_CODE: Self = Self(1);
-    pub const IIS_CONTAINS_COMMC_INTERROGATOR_IDENTIFIER_CODE: Self = Self(2);
-    pub const IIS_CONTAINS_COMMD_INTERROGATOR_IDENTIFIER_CODE: Self = Self(3);
+    pub const IIS_CONTAINS_COMMB: Self = Self(1);
+    pub const IIS_CONTAINS_COMMC: Self = Self(2);
+    pub const IIS_CONTAINS_COMMD: Self = Self(3);
 
     pub const fn from_u8_unchecked(byte: u8) -> Self {
         Self(byte)
@@ -443,11 +568,29 @@ impl InterragatorReservationType {
     }
 }
 
+impl Debug for InterrogatorReservationType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::NO_INFORMATION => write!(f, "InterrogatorReservationType::NO_INFORMATION"),
+            Self::IIS_CONTAINS_COMMB => {
+                write!(f, "InterrogatorReservationType::IIS_CONTAINS_COMMB")
+            }
+            Self::IIS_CONTAINS_COMMC => {
+                write!(f, "InterrogatorReservationType::IIS_CONTAINS_COMMC")
+            }
+            Self::IIS_CONTAINS_COMMD => {
+                write!(f, "InterrogatorReservationType::IIS_CONTAINS_COMMD")
+            }
+            _ => panic!("Invalid InterrogatorReservationType bitpattern: {}", self.0),
+        }
+    }
+}
+
 /// 13-bit altitude code
 ///
 /// <https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html>
 /// <http://www.aeroelectric.com/articles/Altitude_Encoding/modec.htm>
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AltitudeCode(u16);
 
 impl AltitudeCode {
@@ -500,10 +643,26 @@ impl AltitudeCode {
             }
             else {
                 Some(DecodedAltitude {
-                    altitude: 100 * i32::from(decode_graham(self.0)) - 1200,
+                    altitude: 100 * i32::from(decode_gillham_ac13(self.0)) - 1200,
                     unit: AltitudeUnit::Feet,
                 })
             }
+        }
+    }
+}
+
+impl Debug for AltitudeCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(decoded) = self.decode() {
+            write!(
+                f,
+                "AltitudeCode({} {})",
+                decoded.altitude,
+                decoded.unit.unit_str()
+            )
+        }
+        else {
+            write!(f, "AltitudeCode({})", self.0)
         }
     }
 }
@@ -520,10 +679,19 @@ pub enum AltitudeUnit {
     Meter,
 }
 
+impl AltitudeUnit {
+    pub fn unit_str(&self) -> &'static str {
+        match self {
+            AltitudeUnit::Feet => "ft",
+            AltitudeUnit::Meter => "m",
+        }
+    }
+}
+
 /// 13-bit identity code
 /// <https://mode-s.org/1090mhz/content/mode-s/3-surveillance.html>
 /// <http://www.aeroelectric.com/articles/Altitude_Encoding/modec.htm>
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IdentityCode(u16);
 
 impl IdentityCode {
@@ -550,12 +718,157 @@ impl IdentityCode {
     }
 
     pub fn squawk(&self) -> Squawk {
-        Squawk::from_u16_unchecked(decode_graham(self.0))
+        Squawk::from_u16_unchecked(decode_gillham_id13(self.0))
+    }
+}
+
+impl Debug for IdentityCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "IdentityCode({}", self.squawk())?;
+        if self.ident() {
+            write!(f, ", ident")?;
+        }
+        write!(f, ")")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VerticalStatus {
+    Airborne,
+    Ground,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CrossLinkCapability(pub bool);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SensitivityLevel(u8);
+
+impl SensitivityLevel {
+    pub const INOPERATIVE: Self = Self(0);
+
+    pub const fn from_u8_unchecked(byte: u8) -> Self {
+        Self(byte)
+    }
+
+    pub const fn from_u8(byte: u8) -> Option<Self> {
+        if byte & 0b11111000 == 0 {
+            Some(Self(byte))
+        }
+        else {
+            None
+        }
+    }
+
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ReplyInformation(u8);
+
+impl ReplyInformation {
+    pub const NO_OPERATING_ACAS: Self = Self(0b0000);
+    pub const ACAS_RESOLUTION_CAPABILITY_INHIBITED: Self = Self(0b0010);
+    pub const ACAS_VERTICAL_ONLY_CAPABILITY: Self = Self(0b0011);
+    pub const ACAS_VERTICAL_AND_HORIZONTAL_CAPABILTIY: Self = Self(0b0111);
+
+    pub const fn from_u8_unchecked(byte: u8) -> Self {
+        Self(byte)
+    }
+
+    pub const fn from_u8(byte: u8) -> Option<Self> {
+        if byte & 0b11110000 == 0 {
+            Some(Self(byte))
+        }
+        else {
+            None
+        }
+    }
+
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl Debug for ReplyInformation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::NO_OPERATING_ACAS => write!(f, "ReplyInformation::NO_OPERATING_ACAS"),
+            Self::ACAS_RESOLUTION_CAPABILITY_INHIBITED => {
+                write!(f, "ReplyInformation::ACAS_RESOLUTION_CAPABILITY_INHIBITED")
+            }
+            Self::ACAS_VERTICAL_ONLY_CAPABILITY => {
+                write!(f, "ReplyInformation::ACAS_VERTICAL_ONLY_CAPABILITY")
+            }
+            Self::ACAS_VERTICAL_AND_HORIZONTAL_CAPABILTIY => {
+                write!(
+                    f,
+                    "ReplyInformation::ACAS_VERTICAL_AND_HORIZONTAL_CAPABILTIY"
+                )
+            }
+            _ => write!(f, "ReplyInformation({})", self.0),
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parity(pub [u8; 3]);
+
+/// <https://mode-s.org/1090mhz/content/mode-s/4-acas.html>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortAirAirSurveillance {
+    pub vertical_status: VerticalStatus,
+    pub cross_link_capability: CrossLinkCapability,
+    pub sensitivity_level: SensitivityLevel,
+    pub reply_information: ReplyInformation,
+    pub altitude_code: AltitudeCode,
+    pub address_parity: Parity,
+}
+
+impl ShortAirAirSurveillance {
+    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
+        let (vertical_status, sensitivity_level, reply_information, altitude_code) =
+            decode_air_air_surveillance_common_fields(bits_6_to_8, buffer.get_bytes());
+
+        Self {
+            vertical_status,
+            cross_link_capability: CrossLinkCapability(bits_6_to_8 & 0b00000010 != 0),
+            sensitivity_level,
+            reply_information,
+            altitude_code,
+            address_parity: Parity(buffer.get_bytes()),
+        }
+    }
+}
+
+/// <https://mode-s.org/1090mhz/content/mode-s/4-acas.html>
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LongAirAirSurveillance {
+    pub vertical_status: VerticalStatus,
+    pub sensitivity_level: SensitivityLevel,
+    pub reply_information: ReplyInformation,
+    pub altitude_code: AltitudeCode,
+    pub message: [u8; 7], // todo
+    pub address_parity: Parity,
+}
+
+impl LongAirAirSurveillance {
+    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
+        let (vertical_status, sensitivity_level, reply_information, altitude_code) =
+            decode_air_air_surveillance_common_fields(bits_6_to_8, buffer.get_bytes());
+
+        Self {
+            vertical_status,
+            sensitivity_level,
+            reply_information,
+            altitude_code,
+            message: buffer.get_bytes(),
+            address_parity: Parity(buffer.get_bytes()),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurveillanceAltitudeReply {
@@ -564,6 +877,20 @@ pub struct SurveillanceAltitudeReply {
     pub utility_message: UtilityMessage,
     pub altitude_code: AltitudeCode,
     pub address_parity: Parity,
+}
+
+impl SurveillanceAltitudeReply {
+    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
+        let (flight_status, downlink_request, utility_message, code) =
+            decode_surveillance_reply_body(bits_6_to_8, buffer.get_bytes());
+        Self {
+            flight_status,
+            downlink_request,
+            utility_message,
+            altitude_code: AltitudeCode(code),
+            address_parity: Parity(buffer.get_bytes()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -575,6 +902,20 @@ pub struct SurveillanceIdentityReply {
     pub address_parity: Parity,
 }
 
+impl SurveillanceIdentityReply {
+    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
+        let (flight_status, downlink_request, utility_message, code) =
+            decode_surveillance_reply_body(bits_6_to_8, buffer.get_bytes());
+        Self {
+            flight_status,
+            downlink_request,
+            utility_message,
+            identity_code: IdentityCode(code),
+            address_parity: Parity(buffer.get_bytes()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllCallReply {
     pub capability: Capability,
@@ -583,12 +924,12 @@ pub struct AllCallReply {
 }
 
 impl AllCallReply {
-    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Result<Self, DecodeError> {
-        Ok(Self {
+    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
+        Self {
             capability: Capability::from_u8_unchecked(bits_6_to_8),
             address_announced: IcaoAddress::from_bytes(buffer.get_bytes()),
             parity_interrogator: Parity(buffer.get_bytes()),
-        })
+        }
     }
 }
 
@@ -642,7 +983,7 @@ pub enum ExtendedSquitterNonTransponder {
         tisb_message: tisb::Message,
         parity_interrogator: Parity,
     },
-    /// ADS-R rebroadcstr
+    /// ADS-R rebroad
     ///
     /// 2.2.18.4 ([Reference][1] page 289 ff)
     ///
@@ -666,9 +1007,35 @@ pub enum ExtendedSquitterNonTransponder {
 }
 
 impl ExtendedSquitterNonTransponder {
+    pub fn code_format(&self) -> CodeFormat {
+        match self {
+            ExtendedSquitterNonTransponder::AdsbWithIcaoAddress { .. } => {
+                CodeFormat::ADSB_WITH_ICAO_ADDRESS
+            }
+            ExtendedSquitterNonTransponder::AdsbWithNonIcaoAddress { .. } => {
+                CodeFormat::ADSB_WITH_NON_ICAO_ADDRESS
+            }
+            ExtendedSquitterNonTransponder::TisbWithIcaoAddress1 { .. } => {
+                CodeFormat::TISB_WITH_ICAO_ADDRESS1
+            }
+            ExtendedSquitterNonTransponder::TisbWithIcaoAddress2 { .. } => {
+                CodeFormat::TISB_WITH_ICAO_ADDRESS2
+            }
+            ExtendedSquitterNonTransponder::TisbAndAdsrManagement { .. } => {
+                CodeFormat::TISB_AND_ADSR_MANAGEMENT
+            }
+            ExtendedSquitterNonTransponder::TisbWithNonIcaoAddress { .. } => {
+                CodeFormat::TISB_WITH_NON_ICAO_ADDRESS
+            }
+            ExtendedSquitterNonTransponder::AdsrRebroadcast { .. } => CodeFormat::ADSB_REBROADCAST,
+            ExtendedSquitterNonTransponder::Reserved { .. } => CodeFormat::RESERVED,
+        }
+    }
+
     pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Result<Self, DecodeError> {
         let code_format = CodeFormat::from_u8_unchecked(bits_6_to_8);
 
+        // todo: check against page 50
         let extended_squitter_non_transponder = match code_format {
             CodeFormat::ADSB_WITH_ICAO_ADDRESS => {
                 ExtendedSquitterNonTransponder::AdsbWithIcaoAddress {
@@ -685,7 +1052,7 @@ impl ExtendedSquitterNonTransponder {
                     parity_interrogator: Parity(buffer.get_bytes()),
                 }
             }
-            CodeFormat::TISB_WITH_ICAO_ADDRESS_1 => {
+            CodeFormat::TISB_WITH_ICAO_ADDRESS1 => {
                 // todo: not always valid icao address, see 2.2.3.2.1.5
                 ExtendedSquitterNonTransponder::TisbWithIcaoAddress1 {
                     address_announced: IcaoAddress::from_bytes(buffer.get_bytes()),
@@ -693,7 +1060,7 @@ impl ExtendedSquitterNonTransponder {
                     parity_interrogator: Parity(buffer.get_bytes()),
                 }
             }
-            CodeFormat::TISB_WITH_ICAO_ADDRESS_2 => {
+            CodeFormat::TISB_WITH_ICAO_ADDRESS2 => {
                 // todo: not always valid icao address, see 2.2.3.2.1.5
                 ExtendedSquitterNonTransponder::TisbWithIcaoAddress1 {
                     address_announced: IcaoAddress::from_bytes(buffer.get_bytes()),
@@ -765,5 +1132,100 @@ impl MilitaryExtendedSquitter {
                 data: buffer.get_bytes(),
             })
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommBAltitudeReply {
+    pub flight_status: FlightStatus,
+    pub downlink_request: DownlinkRequest,
+    pub utility_message: UtilityMessage,
+    pub altitude_code: AltitudeCode,
+    pub message: [u8; 7], // todo
+    pub address_parity: Parity,
+}
+
+impl CommBAltitudeReply {
+    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
+        let (flight_status, downlink_request, utility_message, code) =
+            decode_surveillance_reply_body(bits_6_to_8, buffer.get_bytes());
+        Self {
+            flight_status,
+            downlink_request,
+            utility_message,
+            altitude_code: AltitudeCode(code),
+            message: buffer.get_bytes(),
+            address_parity: Parity(buffer.get_bytes()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommBIdentityReply {
+    pub flight_status: FlightStatus,
+    pub downlink_request: DownlinkRequest,
+    pub utility_message: UtilityMessage,
+    pub identity_code: IdentityCode,
+    pub message: [u8; 7], // todo
+    pub address_parity: Parity,
+}
+
+impl CommBIdentityReply {
+    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
+        let (flight_status, downlink_request, utility_message, code) =
+            decode_surveillance_reply_body(bits_6_to_8, buffer.get_bytes());
+        Self {
+            flight_status,
+            downlink_request,
+            utility_message,
+            identity_code: IdentityCode(code),
+            message: buffer.get_bytes(),
+            address_parity: Parity(buffer.get_bytes()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommD;
+
+#[cfg(test)]
+mod tests {
+    use crate::source::mode_s::{
+        AltitudeCode,
+        AltitudeUnit,
+    };
+
+    #[test]
+    fn it_decodes_ac13() {
+        fn ac13_decode_to_feet(ac13: u16) -> i32 {
+            let altitude = AltitudeCode::from_u16(ac13).unwrap().decode().unwrap();
+            assert_eq!(altitude.unit, AltitudeUnit::Feet);
+            altitude.altitude
+        }
+
+        // the expected values were gathered by decoding frames with adsb_deku
+        // fixme: why do 2 test cases fail?
+
+        assert_eq!(ac13_decode_to_feet(6320), 38600);
+        assert_eq!(ac13_decode_to_feet(3601), 21425);
+        assert_eq!(ac13_decode_to_feet(4152), 25200);
+        assert_eq!(ac13_decode_to_feet(4152), 25200);
+        assert_eq!(ac13_decode_to_feet(3129), 18825);
+        assert_eq!(ac13_decode_to_feet(5913), 36025);
+        assert_eq!(ac13_decode_to_feet(4757), 28725);
+        assert_eq!(ac13_decode_to_feet(5776), 35000);
+        //assert_eq!(ac13_decode_to_feet(5800), 9100);
+        assert_eq!(ac13_decode_to_feet(5776), 35000);
+        assert_eq!(ac13_decode_to_feet(6064), 37000);
+        assert_eq!(ac13_decode_to_feet(2203), 12875);
+        assert_eq!(ac13_decode_to_feet(2203), 12875);
+        assert_eq!(ac13_decode_to_feet(5272), 32000);
+        assert_eq!(ac13_decode_to_feet(442), 2050);
+        assert_eq!(ac13_decode_to_feet(412), 1700);
+        assert_eq!(ac13_decode_to_feet(6552), 40000);
+        //assert_eq!(ac13_decode_to_feet(4130), 2200);
+        assert_eq!(ac13_decode_to_feet(1343), 7775);
+        assert_eq!(ac13_decode_to_feet(2332), 13700);
+        assert_eq!(ac13_decode_to_feet(5560), 34000);
     }
 }

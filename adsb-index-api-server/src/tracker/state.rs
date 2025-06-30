@@ -19,7 +19,7 @@ use chrono::{
 };
 
 use crate::{
-    source::adsb,
+    source::adsb_deku as adsb,
     util::sparse_list::SparseList,
 };
 

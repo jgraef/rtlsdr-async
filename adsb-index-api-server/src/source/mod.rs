@@ -5,7 +5,7 @@ pub mod mode_s;
 pub mod sbs;
 pub mod tar1090_db;
 
-pub use adsb_deku as adsb;
+pub use adsb_deku;
 use chrono::Utc;
 use futures_util::{
     Stream,
