@@ -5,6 +5,9 @@ use crate::{
     util::BufReadBytesExt,
 };
 
+/// # TODO
+///
+/// Feel free to open a PR :3
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Message {
     pub data: [u8; 7],

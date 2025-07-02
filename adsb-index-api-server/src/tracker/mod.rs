@@ -265,11 +265,11 @@ impl Reactor {
 
     async fn handle_modes_packet(
         &mut self,
-        source_id: SourceId,
-        receiver_id: Option<Uuid>,
+        _source_id: SourceId,
+        _receiver_id: Option<Uuid>,
         mlat_timestamp: MlatTimestamp,
         time_received: DateTime<Utc>,
-        signal_level: beast::SignalLevel,
+        _signal_level: beast::SignalLevel,
         data: &[u8],
     ) -> Result<(), Error> {
         let time = if mlat_timestamp.is_synthetic() {

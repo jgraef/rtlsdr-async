@@ -1,6 +1,10 @@
 use std::{
     collections::HashSet,
     fmt::Debug,
+    io::{
+        BufWriter,
+        Write,
+    },
     path::PathBuf,
     pin::Pin,
     time::Instant,
@@ -11,13 +15,11 @@ use adsb_index_api_server::{
     api::Api,
     database::Database,
     source::{
-        adsb_deku,
         beast,
         history::index_archive_day_from_directory,
         mode_s::{
             self,
             adsb,
-            util::gillham::decode_gillham_ac13,
         },
         sbs,
         tar1090_db::update_aircraft_db,
@@ -112,7 +114,10 @@ async fn main() -> Result<(), Error> {
         Command::SbsClient(args) => {
             args.run(
                 |connection| sbs::Reader::new(connection),
-                |i, message| println!("{i:>4}: {message:?}"),
+                |i, message| {
+                    println!("{i:>4}: {message:?}");
+                    Ok::<(), Error>(())
+                },
             )
             .await?;
         }
@@ -122,13 +127,14 @@ async fn main() -> Result<(), Error> {
             let t_start = Instant::now();
             let mut num_frames = 0;
             let mut num_bytes = 0;
+            let mut callsigns = HashSet::new();
 
-            let mut handle_data = |data: &[u8]| {
+            let mut handle_data = |data: &[u8]| -> Result<(), Error> {
                 //println!("length: {}", data.len());
 
                 //let deku_frame = adsb_deku::Frame::from_bytes(data).unwrap();
 
-                let modes_frame = mode_s::Frame::decode_and_check_checksum(&mut &data[..]).unwrap();
+                let modes_frame = mode_s::Frame::decode_and_check_checksum(&mut &data[..])?;
 
                 state.update_with_mode_s(Utc::now(), &modes_frame);
 
@@ -136,24 +142,40 @@ async fn main() -> Result<(), Error> {
                     mode_s::Frame::MilitaryExtendedSquitter(_military_extended_squitter) => {
                         todo!("military: {modes_frame:#?}");
                     }
+                    mode_s::Frame::ExtendedSquitter(mode_s::ExtendedSquitter {
+                        adsb_message:
+                            adsb::Message::AircraftIdentification(adsb::AircraftIdentification {
+                                callsign,
+                                ..
+                            }),
+                        ..
+                    }) => {
+                        let callsign = callsign.decode_permissive();
+                        if !callsigns.contains(&callsign) {
+                            callsigns.insert(callsign);
+                        }
+                    }
                     _ => {}
                 }
 
                 num_bytes += data.len();
                 num_frames += 1;
+
+                Ok(())
             };
 
             args.run(beast::output::Reader::new, |_i, packet| {
                 match packet {
                     beast::output::OutputPacket::ModeAc { .. } => {}
                     beast::output::OutputPacket::ModeSLong { data, .. } => {
-                        handle_data(&data);
+                        handle_data(&data)?;
                     }
                     beast::output::OutputPacket::ModeSShort { data, .. } => {
-                        handle_data(&data);
+                        handle_data(&data)?;
                     }
                     _ => todo!("{packet:?}"),
                 }
+                Ok::<(), Error>(())
             })
             .await?;
 
@@ -164,7 +186,14 @@ async fn main() -> Result<(), Error> {
                 "{} frames/s, {} MB/s",
                 num_frames as f32 / seconds,
                 num_bytes as f32 / seconds / 1024.0 / 1024.0
-            )
+            );
+
+            let mut callsigns = callsigns.into_iter().collect::<Vec<_>>();
+            callsigns.sort();
+            let mut writer = BufWriter::new(std::fs::File::create("callsigns.txt")?);
+            for callsign in callsigns {
+                writeln!(&mut writer, "{callsign}")?;
+            }
         }
     }
 
@@ -224,12 +253,12 @@ struct ClientTestArgs {
 }
 
 impl ClientTestArgs {
-    pub async fn run<T, F, R, E, P>(&self, f: F, mut p: P) -> Result<(), Error>
+    pub async fn run<T, F, R, E1, P, E2>(&self, f: F, mut p: P) -> Result<(), Error>
     where
         F: FnOnce(BufReader<Pin<Box<dyn AsyncRead>>>) -> R,
-        R: Stream<Item = Result<T, E>>,
-        E: std::error::Error + Send + Sync + 'static,
-        P: FnMut(usize, T),
+        R: Stream<Item = Result<T, E1>>,
+        Error: From<E1> + From<E2>,
+        P: FnMut(usize, T) -> Result<(), E2>,
     {
         let input: Pin<Box<dyn AsyncRead>> = match (&self.address, &self.file) {
             (Some(address), None) => Box::pin(TcpStream::connect(&address).await?),
@@ -243,7 +272,7 @@ impl ClientTestArgs {
 
         let mut i = 0;
         while let Some(message) = reader.try_next().await? {
-            p(i, message);
+            p(i, message)?;
             i += 1;
             if self.limit.map_or(false, |limit| i >= limit) {
                 break;

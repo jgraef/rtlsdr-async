@@ -17,7 +17,6 @@
 
 pub mod acas;
 pub mod adsb;
-pub mod cpr;
 pub mod tisb;
 pub mod util;
 
@@ -69,7 +68,7 @@ pub enum DecodeError {
     },
 
     #[error("CRC check failed")]
-    CrcCheckFailed,
+    CrcCheckFailed(FrameWithChecksum),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,7 +96,7 @@ impl Frame {
         let byte_0 = buffer.try_get_u8().map_err(|_| DecodeError::NoDf)?;
 
         let bits_1_to_5 = byte_0 >> 3;
-        let bits_6_to_8 = byte_0 & 0b111;
+        let bits_6_to_8 = byte_0 & 0b00000111;
         let df = DownlinkFormat::from_u8(bits_1_to_5)?;
 
         // check that the buffer contains enough data
@@ -109,59 +108,74 @@ impl Frame {
             });
         }
 
-        // create a new buffer that is limited to the length of the frame
-        let mut buffer = buffer.take(expected_length - 1);
-        let buffer = &mut buffer;
+        let frame = {
+            // create a new buffer that is limited to the length of the frame
+            let mut buffer = buffer.take(expected_length - 1);
+            let buffer = &mut buffer;
 
-        // decode the DF
-        let frame = match df {
-            DownlinkFormat::ShortAirAirSurveillance => {
-                Self::ShortAirAirSurveillance(ShortAirAirSurveillance::decode(buffer, bits_6_to_8))
-            }
-            DownlinkFormat::SurveillanceAltitudeReply => {
-                Self::SurveillanceAltitudeReply(SurveillanceAltitudeReply::decode(
-                    buffer,
-                    bits_6_to_8,
-                ))
-            }
-            DownlinkFormat::SurveillanceIdentityReply => {
-                Self::SurveillanceIdentityReply(SurveillanceIdentityReply::decode(
-                    buffer,
-                    bits_6_to_8,
-                ))
-            }
-            DownlinkFormat::AllCallReply => {
-                Self::AllCallReply(AllCallReply::decode(buffer, bits_6_to_8))
-            }
-            DownlinkFormat::LongAirAirSurveillance => {
-                Self::LongAirAirSurveillance(LongAirAirSurveillance::decode(buffer, bits_6_to_8))
-            }
-            DownlinkFormat::ExtendedSquitter => {
-                Self::ExtendedSquitter(ExtendedSquitter::decode(buffer, bits_6_to_8)?)
-            }
-            DownlinkFormat::ExtendedSquitterNonTransponder => {
-                Self::ExtendedSquitterNonTransponder(ExtendedSquitterNonTransponder::decode(
-                    buffer,
-                    bits_6_to_8,
-                )?)
-            }
-            DownlinkFormat::MilitaryExtendedSquitter => {
-                Self::MilitaryExtendedSquitter(MilitaryExtendedSquitter::decode(
-                    buffer,
-                    bits_6_to_8,
-                )?)
-            }
-            DownlinkFormat::CommBAltitudeReply => {
-                Self::CommBAltitudeReply(CommBAltitudeReply::decode(buffer, bits_6_to_8))
-            }
-            DownlinkFormat::CommBIdentityReply => {
-                Self::CommBIdentityReply(CommBIdentityReply::decode(buffer, bits_6_to_8))
-            }
-            DownlinkFormat::CommD => {
-                // todo
-                Self::CommD(CommD {
-                    data: buffer.get_bytes(),
-                })
+            // decode the DF
+            match df {
+                DownlinkFormat::ShortAirAirSurveillance => {
+                    Self::ShortAirAirSurveillance(ShortAirAirSurveillance::decode(
+                        buffer,
+                        bits_6_to_8,
+                    ))
+                }
+                DownlinkFormat::SurveillanceAltitudeReply => {
+                    Self::SurveillanceAltitudeReply(SurveillanceAltitudeReply::decode(
+                        buffer,
+                        bits_6_to_8,
+                    ))
+                }
+                DownlinkFormat::SurveillanceIdentityReply => {
+                    Self::SurveillanceIdentityReply(SurveillanceIdentityReply::decode(
+                        buffer,
+                        bits_6_to_8,
+                    ))
+                }
+                DownlinkFormat::AllCallReply => {
+                    Self::AllCallReply(AllCallReply::decode(buffer, bits_6_to_8))
+                }
+                DownlinkFormat::LongAirAirSurveillance => {
+                    Self::LongAirAirSurveillance(LongAirAirSurveillance::decode(
+                        buffer,
+                        bits_6_to_8,
+                    ))
+                }
+                DownlinkFormat::ExtendedSquitter => {
+                    Self::ExtendedSquitter(ExtendedSquitter::decode(buffer, bits_6_to_8)?)
+                }
+                DownlinkFormat::ExtendedSquitterNonTransponder => {
+                    Self::ExtendedSquitterNonTransponder(ExtendedSquitterNonTransponder::decode(
+                        buffer,
+                        bits_6_to_8,
+                    )?)
+                }
+                DownlinkFormat::MilitaryExtendedSquitter => {
+                    Self::MilitaryExtendedSquitter(MilitaryExtendedSquitter::decode(
+                        buffer,
+                        bits_6_to_8,
+                    )?)
+                }
+                DownlinkFormat::CommBAltitudeReply => {
+                    Self::CommBAltitudeReply(CommBAltitudeReply::decode(buffer, bits_6_to_8))
+                }
+                DownlinkFormat::CommBIdentityReply => {
+                    Self::CommBIdentityReply(CommBIdentityReply::decode(buffer, bits_6_to_8))
+                }
+                DownlinkFormat::CommD => {
+                    // > Note Format number 24 is an exception. It is identified using only the first two bits, which must be 11 in binary. All following bits are used for encoding other information.
+                    // https://mode-s.org/1090mhz/content/introduction.html
+                    //
+                    // so we need to pass bits 3 to 8
+                    let bits_3_to_8 = byte_0 & 0b00111111;
+
+                    // todo
+                    Self::CommD(CommD {
+                        bits_3_to_8,
+                        data: buffer.get_bytes(),
+                    })
+                }
             }
         };
 
@@ -202,7 +216,7 @@ impl Frame {
         let frame = Self::decode_and_calculate_checksum(buffer)?;
 
         if !frame.check().unwrap_or(true) {
-            return Err(DecodeError::CrcCheckFailed);
+            return Err(DecodeError::CrcCheckFailed(frame));
         }
 
         Ok(frame.frame)
@@ -316,23 +330,19 @@ pub enum DownlinkFormat {
 
 impl DownlinkFormat {
     pub fn from_u8(byte: u8) -> Result<Self, DecodeError> {
-        if byte & 0b11 == 0b11 {
-            Ok(Self::CommD)
-        }
-        else {
-            match byte {
-                0 => Ok(Self::ShortAirAirSurveillance),
-                4 => Ok(Self::SurveillanceAltitudeReply),
-                5 => Ok(Self::SurveillanceIdentityReply),
-                11 => Ok(Self::AllCallReply),
-                16 => Ok(Self::LongAirAirSurveillance),
-                17 => Ok(Self::ExtendedSquitter),
-                18 => Ok(Self::ExtendedSquitterNonTransponder),
-                19 => Ok(Self::MilitaryExtendedSquitter),
-                20 => Ok(Self::CommBAltitudeReply),
-                21 => Ok(Self::CommBIdentityReply),
-                _ => Err(DecodeError::InvalidDf { value: byte }),
-            }
+        match byte {
+            0 => Ok(Self::ShortAirAirSurveillance),
+            4 => Ok(Self::SurveillanceAltitudeReply),
+            5 => Ok(Self::SurveillanceIdentityReply),
+            11 => Ok(Self::AllCallReply),
+            16 => Ok(Self::LongAirAirSurveillance),
+            17 => Ok(Self::ExtendedSquitter),
+            18 => Ok(Self::ExtendedSquitterNonTransponder),
+            19 => Ok(Self::MilitaryExtendedSquitter),
+            20 => Ok(Self::CommBAltitudeReply),
+            21 => Ok(Self::CommBIdentityReply),
+            24..=31 => Ok(Self::CommD),
+            _ => Err(DecodeError::InvalidDf { value: byte }),
         }
     }
 
@@ -1353,6 +1363,7 @@ impl CommBIdentityReply {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommD {
     // todo
+    pub bits_3_to_8: u8,
     pub data: [u8; 6],
 }
 

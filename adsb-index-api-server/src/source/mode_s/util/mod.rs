@@ -10,7 +10,7 @@ use crate::source::mode_s::{
     SensitivityLevel,
     UtilityMessage,
     VerticalStatus,
-    cpr::{
+    adsb::cpr::{
         Cpr,
         CprFormat,
         CprPosition,
@@ -108,7 +108,7 @@ pub fn decode_frame_aligned_altitude_or_identity_code(bytes: &[u8]) -> u16 {
 /// value ......aa aaaaaaaa aaaaaaab bbbbbbbb bbbbbbbb
 /// ```
 pub fn decode_frame_aligned_cpr(bytes: &[u8]) -> Cpr {
-    let format = CprFormat::from_bool(bytes[0] & 0b00000100 != 0);
+    let format = CprFormat::from_bit(bytes[0] & 0b00000100 != 0);
     let position = CprPosition {
         latitude: CprValue::from_u32_unchecked(
             (u32::from(bytes[0] & 0b10) << 15)

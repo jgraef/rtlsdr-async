@@ -1,7 +1,28 @@
-pub use crate::source::mode_s::cpr::decode::{
-    decode_globally_unambigious,
-    decode_locally_umambiguous,
+//! Compact Position Reporting
+//!
+//! Latitude and longitude information is reported using two alternating
+//! messages (called even and odd). The original position can be recovered using
+//! two methods:
+//!
+//! - global: needs two messages, but might fail if the messages are from
+//!   different "zones".
+//! - local: needs one message and a recent reference position.
+//!  - airborne: reference position needs to be within 180 NM of the actual
+//!    position.
+//!  - surface: reference position needs to be within 45 NM of the actual
+//!    position.
+//!
+//! A.1.7 page A-55(905)
+//!
+//! <https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html>
+
+use std::ops::Not;
+
+pub use self::decode::{
+    decode_globally_unambigious_airborne,
+    decode_locally_umambiguous_airborne,
 };
+use crate::source::mode_s::VerticalStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cpr {
@@ -16,15 +37,40 @@ pub enum CprFormat {
 }
 
 impl CprFormat {
-    pub fn from_bool(bit: bool) -> Self {
+    /// Returns the CPR format from the boolean value of the bit in the
+    /// respective fields.
+    pub fn from_bit(bit: bool) -> Self {
         if bit { CprFormat::Odd } else { CprFormat::Even }
     }
 
-    pub fn as_bool(&self) -> bool {
+    /// The returned boolean corresponds to the value of the bit encoded in the
+    /// frames.
+    pub fn is_even(&self) -> bool {
         match self {
             CprFormat::Even => false,
             CprFormat::Odd => true,
         }
+    }
+
+    #[inline(always)]
+    pub fn is_odd(&self) -> bool {
+        !self.is_even()
+    }
+
+    /// If this is even, returns odd. If this is odd, returns even.
+    pub fn other(&self) -> Self {
+        match self {
+            Self::Even => Self::Odd,
+            Self::Odd => Self::Even,
+        }
+    }
+}
+
+impl Not for CprFormat {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        self.other()
     }
 }
 
@@ -70,15 +116,13 @@ pub enum CprDecodeError {
 }
 
 mod decode {
-    //! https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html
-
     use std::f64::consts::{
         FRAC_PI_2,
         PI,
         TAU,
     };
 
-    use crate::source::mode_s::cpr::{
+    use super::{
         Cpr,
         CprDecodeError,
         CprFormat,
@@ -125,7 +169,12 @@ mod decode {
         }
     }
 
-    pub fn decode_globally_unambigious(
+    /// Decode an even and and odd CPR into latitude and longitude in degrees.
+    ///
+    /// This might fail if the CPRs are from different zones. If you don't have
+    /// both CPRs or if this function fails, you can use
+    /// [`decode_locally_umambiguous`].
+    pub fn decode_globally_unambigious_airborne(
         cpr_even: CprPosition,
         cpr_odd: CprPosition,
         most_recent: CprFormat,
@@ -189,7 +238,13 @@ mod decode {
         })
     }
 
-    pub fn decode_locally_umambiguous(field: Cpr, reference_position: &Position) -> Position {
+    /// Decode an a single CPR using a reference position.
+    ///
+    /// This will always work, but the reference position should be recent.
+    pub fn decode_locally_umambiguous_airborne(
+        field: Cpr,
+        reference_position: &Position,
+    ) -> Position {
         let i = match field.format {
             CprFormat::Even => 0.0,
             CprFormat::Odd => 1.0,
@@ -224,18 +279,119 @@ mod decode {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DecoderBin<T> {
+    vertical_status: VerticalStatus,
+    position: CprPosition,
+    time: T,
+}
+
+/// CPR decoder
+///
+/// This is generic over the type of time you use. All `T` needs to support is
+/// comparisions (i.e [`Ord`][std::cmp::Ord]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CprDecoder<T> {
+    even: Option<DecoderBin<T>>,
+    odd: Option<DecoderBin<T>>,
+}
+
+impl<T: Ord> CprDecoder<T> {
+    /// Push a CPR value into the decoder.
+    ///
+    /// This buffers the CPR value and tries to decode it. It will first try to
+    /// decode it globally with a buffered CPR value. If that fails, it will
+    /// decode it with a reference position, if available.
+    pub fn push(
+        &mut self,
+        cpr: Cpr,
+        vertical_status: VerticalStatus,
+        time: T,
+        reference: Option<Position>,
+    ) -> Option<Position> {
+        // fixme: this uses the airborne decoding
+
+        // first we get the bin for this CPR, and the other one
+        let (mut this_bin, other_bin) = match cpr.format {
+            CprFormat::Even => (&mut self.even, &self.odd),
+            CprFormat::Odd => (&mut self.odd, &self.even),
+        };
+
+        // if we have another bin, check which one is more recent
+        let other_bin_and_most_recent = other_bin.as_ref().map(|other_bin| {
+            let most_recent = if time > other_bin.time {
+                cpr.format
+            }
+            else {
+                cpr.format.other()
+            };
+            (other_bin, most_recent)
+        });
+
+        // write into the bin for the new CPR
+        if let Some(bin) = &mut this_bin {
+            if time > bin.time {
+                bin.vertical_status = vertical_status;
+                bin.position = cpr.position;
+                bin.time = time;
+            }
+            else {
+                // if the CPR data is outdated, we can just return
+                return None;
+            }
+        }
+        else {
+            *this_bin = Some(DecoderBin {
+                vertical_status,
+                position: cpr.position,
+                time,
+            });
+        }
+
+        // now we can decode :)
+        // note: we don't filter stale CPRs here, since the decoding will just fail if
+        // its from different zones.
+        other_bin_and_most_recent
+            .and_then(|(other_bin, most_recent)| {
+                // if we have both even and odd position frames, we can try to determine the
+                // position without a local reference
+
+                // first check if both CPRs are either airborne or surface
+                if other_bin.vertical_status == vertical_status {
+                    let (even, odd) = match cpr.format {
+                        CprFormat::Even => (cpr.position, other_bin.position),
+                        CprFormat::Odd => (other_bin.position, cpr.position),
+                    };
+
+                    decode_globally_unambigious_airborne(even, odd, most_recent).ok()
+                }
+                else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // either we don't have both even and odd, or the global decode failed
+                // (different zones or vertical status)
+                reference.map(|reference| {
+                    // decode with reference
+                    decode_locally_umambiguous_airborne(cpr, &reference)
+                })
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use approx::assert_abs_diff_eq;
 
-    use crate::source::mode_s::cpr::{
+    use super::{
         Cpr,
         CprFormat,
         CprPosition,
         CprValue,
         Position,
-        decode::decode_locally_umambiguous,
-        decode_globally_unambigious,
+        decode::decode_locally_umambiguous_airborne,
+        decode_globally_unambigious_airborne,
     };
 
     #[test]
@@ -252,7 +408,7 @@ mod tests {
         let Position {
             latitude,
             longitude,
-        } = decode_globally_unambigious(cpr_even, cpr_odd, CprFormat::Even).unwrap();
+        } = decode_globally_unambigious_airborne(cpr_even, cpr_odd, CprFormat::Even).unwrap();
 
         assert_abs_diff_eq!(latitude, 52.2572, epsilon = 0.001);
         assert_abs_diff_eq!(longitude, 3.91937, epsilon = 0.001);
@@ -276,7 +432,7 @@ mod tests {
         let Position {
             latitude,
             longitude,
-        } = decode_locally_umambiguous(cpr, &reference_position);
+        } = decode_locally_umambiguous_airborne(cpr, &reference_position);
 
         assert_abs_diff_eq!(latitude, 52.2572, epsilon = 0.001);
         assert_abs_diff_eq!(longitude, 3.91937, epsilon = 0.001);

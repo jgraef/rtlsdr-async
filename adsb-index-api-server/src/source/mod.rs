@@ -1,11 +1,9 @@
 pub mod beast;
 pub mod history;
-pub mod mode_ac;
 pub mod mode_s;
 pub mod sbs;
 pub mod tar1090_db;
 
-pub use adsb_deku;
 use chrono::Utc;
 use futures_util::{
     Stream,

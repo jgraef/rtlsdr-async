@@ -1,3 +1,5 @@
+pub mod cpr;
+
 use std::{
     f64::consts::TAU,
     fmt::{
@@ -14,7 +16,7 @@ use crate::{
     source::mode_s::{
         AltitudeUnit,
         DecodeError,
-        cpr::Cpr,
+        adsb::cpr::Cpr,
         util::{
             decode_frame_aligned_altitude_or_identity_code,
             decode_frame_aligned_cpr,
@@ -146,7 +148,7 @@ impl AircraftIdentification {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SurfacePosition {
-    pub ground_speed: Movement,
+    pub movement: Movement,
     pub ground_track: Option<GroundTrack>,
     pub time: bool,
     pub cpr: Cpr,
@@ -157,7 +159,7 @@ impl SurfacePosition {
         let bytes: [u8; 6] = buffer.get_bytes();
         let cpr = decode_frame_aligned_cpr(&bytes[1..]);
         Self {
-            ground_speed: Movement((bits_6_to_8 << 4) | (bytes[0] >> 4)),
+            movement: Movement((bits_6_to_8 << 4) | (bytes[0] >> 4)),
             ground_track: if bytes[0] & 0b00001000 == 0 {
                 None
             }
@@ -1361,25 +1363,23 @@ impl EncodedCallsign {
 
     /// Decodes the callsign into a small string
     pub fn decode(&self) -> Result<Callsign, InvalidCallsign> {
-        let mut expanded = self.expand();
+        let expanded = self.expand();
+        let mut characters = [0; 8];
 
         // resolve to ascii character
-        for (i, byte) in expanded.iter_mut().enumerate() {
-            let resolved = CALLSIGN_ENCODING[*byte as usize];
+        for (i, byte) in expanded.iter().enumerate() {
+            characters[i] = CALLSIGN_ENCODING[*byte as usize];
 
-            if resolved == b'#' {
+            if characters[i] == b'#' {
                 return Err(InvalidCallsign {
+                    expanded,
                     position: i,
                     character: *byte,
                 });
             }
-
-            *byte = resolved;
         }
 
-        Ok(Callsign {
-            characters: expanded,
-        })
+        Ok(Callsign { characters })
     }
 
     // Decodes the callsign into a small string and ignores invalid characters
@@ -1388,7 +1388,7 @@ impl EncodedCallsign {
 
         // resolve to ascii character
         for byte in &mut expanded {
-            let resolved = CALLSIGN_ENCODING[*byte as usize];
+            let resolved = CALLSIGN_ENCODING_PERMISSIVE[*byte as usize];
             *byte = resolved;
         }
 
@@ -1397,6 +1397,20 @@ impl EncodedCallsign {
         }
     }
 }
+
+/// This is the character set MOPS specifies, but readsb uses this one:
+///
+/// ```plain
+/// b"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?"
+/// ```
+///
+/// <https://mode-s.org/1090mhz/content/ads-b/2-identification.html>
+const CALLSIGN_ENCODING: &'static [u8] =
+    b"#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######";
+
+/// readsb uses this and calls it an AIS charset.
+const CALLSIGN_ENCODING_PERMISSIVE: &'static [u8] =
+    b"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_ !\"#$%&'()*+,-./0123456789:;<=>?";
 
 impl Debug for EncodedCallsign {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1411,6 +1425,7 @@ impl Debug for EncodedCallsign {
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("Invalid character {character:02x} at position {position}")]
 pub struct InvalidCallsign {
+    pub expanded: [u8; 8],
     pub position: usize,
     pub character: u8,
 }
@@ -1494,10 +1509,6 @@ pub enum CallsignFromStrError {
     #[error("Invalid length for callsign: {0}")]
     InvalidLength(usize),
 }
-
-/// <https://mode-s.org/1090mhz/content/ads-b/2-identification.html>
-const CALLSIGN_ENCODING: &'static [u8] =
-    b"#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######";
 
 pub fn valid_callsign_char(c: char) -> bool {
     c.is_ascii_uppercase() || c.is_ascii_digit() || c == ' '
@@ -1819,6 +1830,25 @@ pub struct GroundSpeed {
     pub velocity_north_south: Option<Velocity>,
 }
 
+impl GroundSpeed {
+    /// Returns ground speed as x and y components in knots.
+    ///
+    /// X values go from west to east, Y values go from south to north.
+    pub fn components(&self, supersonic: bool) -> Option<[i16; 2]> {
+        let v_ew = i16::try_from(self.velocity_east_west?.as_knots(supersonic)).unwrap();
+        let v_ns = i16::try_from(self.velocity_north_south?.as_knots(supersonic)).unwrap();
+        let s_ew = match self.direction_east_west {
+            DirectionEastWest::WestToEast => 1,
+            DirectionEastWest::EastToWest => -1,
+        };
+        let s_ns = match self.direction_north_south {
+            DirectionNorthSouth::SouthToNorth => 1,
+            DirectionNorthSouth::NorthToSouth => -1,
+        };
+        Some([v_ew * s_ew, v_ns * s_ns])
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DirectionNorthSouth {
     SouthToNorth,
@@ -1865,9 +1895,9 @@ impl Velocity {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Airspeed {
-    magnetic_heading: Option<MagneticHeading>,
-    airspeed_type: AirspeedType,
-    airspeed_value: Option<Velocity>,
+    pub magnetic_heading: Option<MagneticHeading>,
+    pub airspeed_type: AirspeedType,
+    pub airspeed_value: Option<Velocity>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

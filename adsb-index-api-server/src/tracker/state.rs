@@ -1,12 +1,6 @@
-use std::{
-    collections::{
-        HashMap,
-        hash_map,
-    },
-    ops::{
-        Deref,
-        DerefMut,
-    },
+use std::collections::{
+    HashMap,
+    hash_map,
 };
 
 use adsb_index_api_types::{
@@ -15,17 +9,22 @@ use adsb_index_api_types::{
 };
 use chrono::{
     DateTime,
+    TimeDelta,
     Utc,
 };
 
 use crate::{
     source::mode_s::{
         self,
+        VerticalStatus,
         adsb::{
             self,
             Callsign,
+            cpr::{
+                self,
+                CprDecoder,
+            },
         },
-        cpr,
     },
     util::sparse_list::SparseList,
 };
@@ -33,9 +32,7 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct State {
     aircraft: SparseList<AircraftState>,
-    by_icao_address: HashMap<IcaoAddress, usize>,
-    by_callsign: HashMap<Callsign, usize>,
-    by_squawk: HashMap<Squawk, usize>,
+    indices: AircraftIndices,
 }
 
 impl State {
@@ -44,7 +41,7 @@ impl State {
         icao_address: IcaoAddress,
         time: DateTime<Utc>,
     ) -> UpdateAircraftState<'_> {
-        let (index, aircraft) = match self.by_icao_address.entry(icao_address) {
+        let (index, aircraft) = match self.indices.by_icao_address.entry(icao_address) {
             hash_map::Entry::Occupied(occupied) => {
                 let index = *occupied.get();
                 let aircraft = &mut self.aircraft[index];
@@ -63,8 +60,7 @@ impl State {
         UpdateAircraftState {
             index,
             state: aircraft,
-            by_callsign: &mut self.by_callsign,
-            by_squawk: &mut self.by_squawk,
+            indices: &mut self.indices,
             time,
         }
     }
@@ -75,8 +71,8 @@ impl State {
         time: DateTime<Utc>,
         position: Position,
     ) {
-        let mut aircraft = self.update_aircraft(icao_address, time);
-        aircraft.position.update(time, position);
+        let aircraft = self.update_aircraft(icao_address, time);
+        aircraft.state.position.update(time, position);
     }
 
     pub fn update_with_mode_s(&mut self, time: DateTime<Utc>, frame: &mode_s::Frame) {
@@ -127,8 +123,14 @@ impl State {
             adsb::Message::AircraftIdentification(aircraft_identification) => {
                 aircraft.update_aircraft_identification(aircraft_identification)
             }
+            adsb::Message::SurfacePosition(surface_position) => {
+                aircraft.update_surface_position(surface_position)
+            }
             adsb::Message::AirbornePosition(airborne_position) => {
                 aircraft.update_airborne_position(airborne_position)
+            }
+            adsb::Message::AirborneVelocity(airborne_velocity) => {
+                aircraft.update_airborne_velocity(airborne_velocity)
             }
             adsb::Message::AircraftStatus(aircraft_status) => {
                 aircraft.update_aircraft_status(aircraft_status)
@@ -136,6 +138,13 @@ impl State {
             _ => {}
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct AircraftIndices {
+    by_icao_address: HashMap<IcaoAddress, usize>,
+    by_callsign: HashMap<Callsign, usize>,
+    by_squawk: HashMap<Squawk, usize>,
 }
 
 #[derive(Debug)]
@@ -147,6 +156,7 @@ pub struct AircraftState {
     pub callsign: Option<Timestamped<Callsign>>,
     pub squawk: Option<Timestamped<Squawk>>,
 
+    // latitude and longitude
     pub position: Option<Timestamped<Position>>,
 
     // in ft
@@ -156,12 +166,16 @@ pub struct AircraftState {
     pub altitude_gnss: Option<Timestamped<i32>>,
 
     // in kt
-    //pub ground_speed: Option<Timestamped<GroundSpeed>>,
-    pub track: Option<Timestamped<f64>>,
-    pub vertical_rate: Option<Timestamped<f64>>,
+    pub ground_speed: Option<Timestamped<f64>>,
+    pub airspeed: Option<Timestamped<f64>>,
 
-    pub airborne_position_even: Option<Timestamped<cpr::CprPosition>>,
-    pub airborne_position_odd: Option<Timestamped<cpr::CprPosition>>,
+    // in radians, clockwise
+    pub track: Option<Timestamped<f64>>,
+    pub magnetic_heading: Option<Timestamped<f64>>,
+
+    pub vertical_status: Option<VerticalStatus>,
+
+    pub cpr_decoder: CprDecoder<DateTime<Utc>>,
 
     pub frames: Vec<mode_s::Frame>,
 }
@@ -174,16 +188,17 @@ impl AircraftState {
                 last_update: time,
                 value: (),
             },
-            callsign: Default::default(),
-            squawk: Default::default(),
-            position: Default::default(),
-            altitude_barometric: Default::default(),
-            altitude_gnss: Default::default(),
-            //ground_speed: Default::default(),
-            track: Default::default(),
-            vertical_rate: Default::default(),
-            airborne_position_even: None,
-            airborne_position_odd: None,
+            callsign: None,
+            squawk: None,
+            position: None,
+            altitude_barometric: None,
+            altitude_gnss: None,
+            ground_speed: None,
+            airspeed: None,
+            track: None,
+            magnetic_heading: None,
+            vertical_status: None,
+            cpr_decoder: Default::default(),
             frames: vec![],
         }
     }
@@ -196,19 +211,9 @@ pub struct Position {
     pub source: PositionSource,
 }
 
-impl From<cpr::Position> for Position {
-    fn from(value: cpr::Position) -> Self {
-        Self {
-            latitude: value.latitude,
-            longitude: value.longitude,
-            source: PositionSource::Adbs,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PositionSource {
-    Adbs,
+    Gnss,
     Mlat,
 }
 
@@ -257,43 +262,31 @@ impl<T> UpdateTimestamped<T> for Option<Timestamped<T>> {
 pub struct UpdateAircraftState<'a> {
     index: usize,
     state: &'a mut AircraftState,
-    by_callsign: &'a mut HashMap<Callsign, usize>,
-    by_squawk: &'a mut HashMap<Squawk, usize>,
+    indices: &'a mut AircraftIndices,
     time: DateTime<Utc>,
 }
 
 impl<'a> UpdateAircraftState<'a> {
-    pub fn update_airborne_position(&mut self, airborne_position: &adsb::AirbornePosition) {
-        // the transponder will transmit position data over 2 frames, alternating
-        // between even and odd frames. so we need to buffer those.
-        match airborne_position.cpr.format {
-            cpr::CprFormat::Even => &mut self.state.airborne_position_even,
-            cpr::CprFormat::Odd => &mut self.state.airborne_position_odd,
-        }
-        .update(self.time, airborne_position.cpr.position);
+    pub fn update_surface_position(&mut self, surface_position: &adsb::SurfacePosition) {
+        self.update_position(&surface_position.cpr, VerticalStatus::Ground);
 
-        // if we have both even and odd position frames, we can determine the exact
-        // global position
-        // todo: if we already know its position, we can also use local decoding (e.g.
-        // if global fails)
-        if let Some(pair) = self
-            .state
-            .airborne_position_even
-            .as_ref()
-            .zip(self.state.airborne_position_odd.as_ref())
-        {
-            let most_recent = if pair.0.last_update > pair.1.last_update {
-                cpr::CprFormat::Even
-            }
-            else {
-                cpr::CprFormat::Odd
-            };
-            if let Ok(position) =
-                cpr::decode_globally_unambigious(pair.0.value, pair.1.value, most_recent)
-            {
-                self.state.position.update(self.time, position.into());
-            }
+        if let Some(speed) = surface_position.movement.decode() {
+            self.state.ground_speed.update(self.time, speed);
         }
+
+        if let Some(track) = surface_position
+            .ground_track
+            .map(|track| track.as_radians())
+        {
+            self.state.track.update(self.time, track);
+        }
+
+        self.state.vertical_status = Some(VerticalStatus::Ground);
+    }
+
+    pub fn update_airborne_position(&mut self, airborne_position: &adsb::AirbornePosition) {
+        // update position
+        self.update_position(&airborne_position.cpr, VerticalStatus::Ground);
 
         // update altitude
         if let Some(altitude) = airborne_position.altitude() {
@@ -310,10 +303,38 @@ impl<'a> UpdateAircraftState<'a> {
                 }
             }
         }
+
+        self.state.vertical_status = Some(VerticalStatus::Airborne);
     }
 
     pub fn update_airborne_velocity(&mut self, velocity: &adsb::AirborneVelocity) {
-        todo!();
+        match velocity.velocity_type {
+            adsb::VelocityType::GroundSpeed(ground_speed) => {
+                if let Some([vx, vy]) = ground_speed.components(velocity.supersonic) {
+                    let vx = vx as f64;
+                    let vy = vy as f64;
+                    let ground_speed = vx.hypot(vy);
+                    let track = vx.atan2(vy);
+                    self.state.ground_speed.update(self.time, ground_speed);
+                    self.state.track.update(self.time, track);
+                }
+            }
+            adsb::VelocityType::Airspeed(airspeed) => {
+                if let Some(magnetic_heading) = &airspeed.magnetic_heading {
+                    self.state
+                        .magnetic_heading
+                        .update(self.time, magnetic_heading.as_radians());
+
+                    if let Some(airspeed) = &airspeed.airspeed_value {
+                        self.state
+                            .airspeed
+                            .update(self.time, airspeed.as_knots(velocity.supersonic) as f64);
+                    }
+                }
+            }
+        }
+
+        self.state.vertical_status = Some(VerticalStatus::Airborne);
     }
 
     pub fn update_aircraft_identification(
@@ -323,6 +344,37 @@ impl<'a> UpdateAircraftState<'a> {
         self.update_callsign(identification.callsign.decode_permissive());
     }
 
+    pub fn update_position(&mut self, cpr: &cpr::Cpr, airborne_or_surface: VerticalStatus) {
+        let reference = self.state.position.as_ref().and_then(|reference| {
+            // reference needs to be close to actual location. we estimate this by
+            // assuming the aircraft is at most at mach-1 (1225 km/h)
+            // 180NM = 333.36 km (airborne) -> 979s
+            // 45NM = 83.34 km (surface) -> 244s
+            const TOO_OLD: TimeDelta = TimeDelta::seconds(240);
+            (self.time.signed_duration_since(reference.last_update) < TOO_OLD).then_some(
+                cpr::Position {
+                    latitude: reference.value.latitude,
+                    longitude: reference.value.longitude,
+                },
+            )
+        });
+
+        if let Some(position) =
+            self.state
+                .cpr_decoder
+                .push(*cpr, airborne_or_surface, self.time, reference)
+        {
+            self.state.position.update(
+                self.time,
+                Position {
+                    latitude: position.latitude,
+                    longitude: position.longitude,
+                    source: PositionSource::Gnss,
+                },
+            );
+        }
+    }
+
     pub fn update_callsign(&mut self, callsign: Callsign) {
         update_timestamped_option_with_index_update::<Callsign, Callsign>(
             &mut self.state.callsign,
@@ -330,8 +382,10 @@ impl<'a> UpdateAircraftState<'a> {
             &callsign,
             |old_callsign, new_callsign| {
                 if let Some(old_callsign) = old_callsign {
-                    self.by_callsign.remove(old_callsign);
-                    self.by_callsign.insert(new_callsign.to_owned(), self.index);
+                    self.indices.by_callsign.remove(old_callsign);
+                    self.indices
+                        .by_callsign
+                        .insert(new_callsign.to_owned(), self.index);
                 }
             },
         );
@@ -355,25 +409,11 @@ impl<'a> UpdateAircraftState<'a> {
             &squawk,
             |old_squawk, new_squawk| {
                 if let Some(old_squawk) = old_squawk {
-                    self.by_squawk.remove(old_squawk);
-                    self.by_squawk.insert(*new_squawk, self.index);
+                    self.indices.by_squawk.remove(old_squawk);
+                    self.indices.by_squawk.insert(*new_squawk, self.index);
                 }
             },
         );
-    }
-}
-
-impl<'a> Deref for UpdateAircraftState<'a> {
-    type Target = AircraftState;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.state
-    }
-}
-
-impl<'a> DerefMut for UpdateAircraftState<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.state
     }
 }
 
