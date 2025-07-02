@@ -127,35 +127,15 @@ async fn main() -> Result<(), Error> {
             let t_start = Instant::now();
             let mut num_frames = 0;
             let mut num_bytes = 0;
-            let mut callsigns = HashSet::new();
 
             let mut handle_data = |data: &[u8]| -> Result<(), Error> {
-                //println!("length: {}", data.len());
-
-                //let deku_frame = adsb_deku::Frame::from_bytes(data).unwrap();
-
-                let modes_frame = mode_s::Frame::decode_and_check_checksum(&mut &data[..])?;
-
-                state.update_with_mode_s(Utc::now(), &modes_frame);
-
-                match &modes_frame {
-                    mode_s::Frame::MilitaryExtendedSquitter(_military_extended_squitter) => {
-                        todo!("military: {modes_frame:#?}");
+                match mode_s::Frame::decode_and_check_checksum(&mut &data[..]) {
+                    Ok(frame) => {
+                        state.update_with_mode_s(Utc::now(), &frame);
                     }
-                    mode_s::Frame::ExtendedSquitter(mode_s::ExtendedSquitter {
-                        adsb_message:
-                            adsb::Message::AircraftIdentification(adsb::AircraftIdentification {
-                                callsign,
-                                ..
-                            }),
-                        ..
-                    }) => {
-                        let callsign = callsign.decode_permissive();
-                        if !callsigns.contains(&callsign) {
-                            callsigns.insert(callsign);
-                        }
+                    Err(error) => {
+                        tracing::error!(?error, ?data);
                     }
-                    _ => {}
                 }
 
                 num_bytes += data.len();
@@ -188,11 +168,9 @@ async fn main() -> Result<(), Error> {
                 num_bytes as f32 / seconds / 1024.0 / 1024.0
             );
 
-            let mut callsigns = callsigns.into_iter().collect::<Vec<_>>();
-            callsigns.sort();
             let mut writer = BufWriter::new(std::fs::File::create("callsigns.txt")?);
-            for callsign in callsigns {
-                writeln!(&mut writer, "{callsign}")?;
+            for aircraft in state.iter_aircraft() {
+                writeln!(&mut writer, "{aircraft:#?}")?;
             }
         }
     }

@@ -6,10 +6,9 @@
 //! - [Annex 10 to the Convetion on International Civil Aviation][3] -
 //!   specifications on Mode A/C/S in general
 //!
-//! # Notes
-//!
-//! short = 56 bits / 7 bytes
-//! long = 112 bits / 14 bytes
+//! Mode-S defines 2 frame lengths:
+//! - short = 56 bits / 7 bytes
+//! - long = 112 bits / 14 bytes
 //!
 //! [1]: http://www.anteni.net/adsb/Doc/1090-WP30-18-DRAFT_DO-260B-V42.pdf
 //! [2]: https://mode-s.org/1090mhz/content/mode-s/1-basics.html
@@ -296,8 +295,7 @@ impl FrameWithChecksum {
     /// overlay the parity with other data.
     pub fn check(&self) -> Option<bool> {
         match &self.frame {
-            Frame::AllCallReply(_)
-            | Frame::ExtendedSquitter(_)
+            Frame::ExtendedSquitter(_)
             | Frame::ExtendedSquitterNonTransponder(_)
             | Frame::MilitaryExtendedSquitter(_) => Some(self.checksum.check()),
             _ => None,
@@ -742,30 +740,31 @@ impl AltitudeCode {
         // max value of 50175, so we need a i32 for the decoded altitude
 
         // todo: adsb_deku considers AC=0 and AC=0x1fff to be invalid, but is it?
-        if self.0 == 0 || self.0 == 0b0001111111111111 {
+        if self.0 == 0 || self.0 == 0b1_1111_1111_1111 {
             None
         }
         else {
-            let m_bit = self.0 & 0b0000001000000 != 0;
-            let q_bit = self.0 & 0b0000000010000 != 0;
-
-            let remove_q_bit = || {
-                i32::from(
-                    ((self.0 & 0b1111110000000) >> 2)
-                        | ((self.0 & 0b0000000100000) >> 1)
-                        | (self.0 & 0b0000000001111),
-                )
-            };
+            // bit  0 1234 5678 9abc
+            //      a aaaa amaq aaaa
+            let m_bit = self.0 & 0b0_0000_0100_0000 != 0;
+            let q_bit = self.0 & 0b0_0000_0001_0000 != 0;
 
             if m_bit {
                 Some(Altitude {
-                    altitude: remove_q_bit(),
+                    altitude: i32::from(
+                        ((self.0 & 0b1_1111_1000_0000) >> 1) | (self.0 & 0b0_0000_0011_1111),
+                    ),
                     unit: AltitudeUnit::Meter,
                 })
             }
             else if q_bit {
+                let altitude = i32::from(
+                    ((self.0 & 0b1_1111_1000_0000) >> 2)
+                        | ((self.0 & 0b0_0000_0010_0000) >> 1)
+                        | (self.0 & 0b0_0000_0000_1111),
+                );
                 Some(Altitude {
-                    altitude: 25 * remove_q_bit() - 1000,
+                    altitude: 25 * altitude - 1000,
                     unit: AltitudeUnit::Feet,
                 })
             }
@@ -972,9 +971,6 @@ impl AddressParity {
 }
 
 /// The checksum of a frame.
-///
-/// This can be calculated while reading a whole frame with
-/// [`Frame::decode_with_checksum`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Checksum(pub [u8; 3]);
 

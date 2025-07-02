@@ -1,3 +1,5 @@
+//! Utilities
+
 pub mod gillham;
 
 use bytes::Buf;
@@ -11,10 +13,10 @@ use crate::source::mode_s::{
     UtilityMessage,
     VerticalStatus,
     adsb::cpr::{
+        CoodinateCode,
         Cpr,
-        CprCoodinate,
-        CprFormat,
-        CprPosition,
+        Format,
+        PositionCode,
     },
 };
 
@@ -108,14 +110,14 @@ pub fn decode_frame_aligned_altitude_or_identity_code(bytes: &[u8]) -> u16 {
 /// value ......aa aaaaaaaa aaaaaaab bbbbbbbb bbbbbbbb
 /// ```
 pub fn decode_frame_aligned_cpr(bytes: &[u8]) -> Cpr {
-    let format = CprFormat::from_bit(bytes[0] & 0b00000100 != 0);
-    let position = CprPosition {
-        latitude: CprCoodinate::from_u32_unchecked(
+    let format = Format::from_bit(bytes[0] & 0b00000100 != 0);
+    let position = PositionCode {
+        latitude: CoodinateCode::from_u32_unchecked(
             (u32::from(bytes[0] & 0b10) << 15)
                 | (u32::from(bytes[1]) << 7)
                 | u32::from(bytes[2] >> 1),
         ),
-        longitude: CprCoodinate::from_u32_unchecked(
+        longitude: CoodinateCode::from_u32_unchecked(
             (u32::from(bytes[2] & 0b1) << 16) | (u32::from(bytes[3]) << 8) | u32::from(bytes[4]),
         ),
     };
@@ -136,8 +138,7 @@ pub const CRC_24_MODES: crc::Algorithm<u32> = crc::Algorithm {
     residue: 0x000000,
 };
 
-/// Wraps a [`Buf`][bytes::Buf] that calculates the CRC checksum of the read
-/// data.
+/// Wraps a [`Buf`] that calculates the CRC checksum of the read data.
 pub struct CrcBuf<'a, B> {
     pub inner: B,
     pub digest: crc::Digest<'a, u32>,

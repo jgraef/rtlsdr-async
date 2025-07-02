@@ -22,7 +22,7 @@ use crate::{
             Callsign,
             cpr::{
                 self,
-                CprDecoder,
+                Decoder,
             },
         },
     },
@@ -41,28 +41,32 @@ impl State {
         icao_address: IcaoAddress,
         time: DateTime<Utc>,
     ) -> UpdateAircraftState<'_> {
-        let (index, aircraft) = match self.indices.by_icao_address.entry(icao_address) {
+        let (index, state) = match self.indices.by_icao_address.entry(icao_address) {
             hash_map::Entry::Occupied(occupied) => {
                 let index = *occupied.get();
-                let aircraft = &mut self.aircraft[index];
-                aircraft.last_seen.update(time, ());
-                (index, aircraft)
+                let state = &mut self.aircraft[index];
+                state.last_seen.update(time, ());
+                (index, state)
             }
             hash_map::Entry::Vacant(vacant) => {
-                let (index, aircraft) = self
+                let (index, state) = self
                     .aircraft
                     .insert_and_get_mut(AircraftState::new(icao_address, time));
                 vacant.insert(index);
-                (index, aircraft)
+                (index, state)
             }
         };
 
         UpdateAircraftState {
             index,
-            state: aircraft,
+            state,
             indices: &mut self.indices,
             time,
         }
+    }
+
+    pub fn iter_aircraft(&self) -> impl Iterator<Item = &AircraftState> {
+        self.aircraft.iter()
     }
 
     pub fn update_mlat_position(
@@ -100,12 +104,11 @@ impl State {
             ) => {
                 self.update_with_adsb(time, *address_announced, adsb_message);
             }
-            mode_s::Frame::MilitaryExtendedSquitter(mode_s::MilitaryExtendedSquitter::Adsb {
-                address_announced,
-                adsb_message,
-                ..
-            }) => {
-                self.update_with_adsb(time, *address_announced, adsb_message);
+            mode_s::Frame::MilitaryExtendedSquitter(_military_extended_squitter) => {
+                todo!("military: {frame:#?}");
+
+                //self.update_with_adsb(time, *address_announced,
+                // adsb_message);
             }
             _ => {}
         }
@@ -163,7 +166,7 @@ pub struct AircraftState {
     pub altitude_barometric: Option<Timestamped<i32>>,
 
     // in m
-    pub altitude_gnss: Option<Timestamped<i32>>,
+    pub altitude_gnss: Option<Timestamped<u32>>,
 
     // in kt
     pub ground_speed: Option<Timestamped<f64>>,
@@ -175,9 +178,7 @@ pub struct AircraftState {
 
     pub vertical_status: Option<VerticalStatus>,
 
-    pub cpr_decoder: CprDecoder<DateTime<Utc>>,
-
-    pub frames: Vec<mode_s::Frame>,
+    pub cpr_decoder: Decoder<DateTime<Utc>>,
 }
 
 impl AircraftState {
@@ -199,7 +200,6 @@ impl AircraftState {
             magnetic_heading: None,
             vertical_status: None,
             cpr_decoder: Default::default(),
-            frames: vec![],
         }
     }
 }
@@ -290,16 +290,19 @@ impl<'a> UpdateAircraftState<'a> {
 
         // update altitude
         if let Some(altitude) = airborne_position.altitude() {
-            match altitude.altitude_type {
-                adsb::AltitudeType::Barometric => {
-                    self.state
-                        .altitude_barometric
-                        .update(self.time, altitude.altitude);
+            match altitude {
+                adsb::Altitude::Barometric(altitude) => {
+                    //println!("baro altitude: 0x{:03x} -> {}",
+                    // airborne_position.encoded_altitude.as_u16(), altitude);
+                    self.state.altitude_barometric.update(self.time, altitude);
                 }
-                adsb::AltitudeType::Gnss => {
-                    self.state
-                        .altitude_gnss
-                        .update(self.time, altitude.altitude);
+                adsb::Altitude::Gnss(altitude) => {
+                    println!(
+                        "gnss altitude: 0x{:03x} -> {}",
+                        airborne_position.encoded_altitude.as_u16(),
+                        altitude
+                    );
+                    //self.state.altitude_gnss.update(self.time, altitude);
                 }
             }
         }
@@ -344,14 +347,10 @@ impl<'a> UpdateAircraftState<'a> {
         self.update_callsign(identification.callsign.decode_permissive());
     }
 
-    pub fn update_position(&mut self, cpr: &cpr::Cpr, airborne_or_surface: VerticalStatus) {
+    pub fn update_position(&mut self, cpr: &cpr::Cpr, vertical_status: VerticalStatus) {
         let reference = self.state.position.as_ref().and_then(|reference| {
-            // reference needs to be close to actual location. we estimate this by
-            // assuming the aircraft is at most at mach-1 (1225 km/h)
-            // 180NM = 333.36 km (airborne) -> 979s
-            // 45NM = 83.34 km (surface) -> 244s
-            const TOO_OLD: TimeDelta = TimeDelta::seconds(240);
-            (self.time.signed_duration_since(reference.last_update) < TOO_OLD).then_some(
+            const TOO_OLD: TimeDelta = TimeDelta::seconds(10);
+            (self.time.signed_duration_since(reference.last_update) <= TOO_OLD).then_some(
                 cpr::Position {
                     latitude: reference.value.latitude,
                     longitude: reference.value.longitude,
@@ -362,7 +361,7 @@ impl<'a> UpdateAircraftState<'a> {
         if let Some(position) =
             self.state
                 .cpr_decoder
-                .push(*cpr, airborne_or_surface, self.time, reference)
+                .push(*cpr, vertical_status, self.time, reference)
         {
             self.state.position.update(
                 self.time,

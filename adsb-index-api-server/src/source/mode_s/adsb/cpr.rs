@@ -7,43 +7,43 @@
 //! - global: needs two messages, but might fail if the messages are from
 //!   different "zones".
 //! - local: needs one message and a recent reference position.
-//!  - airborne: reference position needs to be within 180 NM of the actual
-//!    position.
-//!  - surface: reference position needs to be within 45 NM of the actual
-//!    position.
+//!   - airborne: reference position needs to be within 180 NM of the actual
+//!     position.
+//!   - surface: reference position needs to be within 45 NM of the actual
+//!     position.
 //!
 //! <https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html>
 
 use std::ops::Not;
 
-pub use self::algorithm::CprAlgorithm;
+pub use self::algorithm::Algorithm;
 use crate::source::mode_s::VerticalStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cpr {
-    pub format: CprFormat,
-    pub position: CprPosition,
+    pub format: Format,
+    pub position: PositionCode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CprFormat {
+pub enum Format {
     Even,
     Odd,
 }
 
-impl CprFormat {
+impl Format {
     /// Returns the CPR format from the boolean value of the bit in the
     /// respective fields.
     pub fn from_bit(bit: bool) -> Self {
-        if bit { CprFormat::Odd } else { CprFormat::Even }
+        if bit { Format::Odd } else { Format::Even }
     }
 
     /// The returned boolean corresponds to the value of the bit encoded in the
     /// frames.
     pub fn is_even(&self) -> bool {
         match self {
-            CprFormat::Even => false,
-            CprFormat::Odd => true,
+            Format::Even => false,
+            Format::Odd => true,
         }
     }
 
@@ -61,7 +61,7 @@ impl CprFormat {
     }
 }
 
-impl Not for CprFormat {
+impl Not for Format {
     type Output = Self;
 
     fn not(self) -> Self::Output {
@@ -70,16 +70,16 @@ impl Not for CprFormat {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CprPosition {
-    pub latitude: CprCoodinate,
-    pub longitude: CprCoodinate,
+pub struct PositionCode {
+    pub latitude: CoodinateCode,
+    pub longitude: CoodinateCode,
 }
 
 /// 17 bit encoded latitude/longitude
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CprCoodinate(u32);
+pub struct CoodinateCode(u32);
 
-impl CprCoodinate {
+impl CoodinateCode {
     pub const fn from_u32_unchecked(word: u32) -> Self {
         Self(word)
     }
@@ -105,7 +105,7 @@ pub struct Position {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CprDecodeError {
+pub enum DecodeError {
     #[error("messages must be from the same longitude zone")]
     MessagesFromDifferentLongitudeZones { nl_lat_even: f64, nl_lat_odd: f64 },
 }
@@ -118,12 +118,12 @@ mod algorithm {
     };
 
     use super::{
+        CoodinateCode,
         Cpr,
-        CprCoodinate,
-        CprDecodeError,
-        CprFormat,
-        CprPosition,
+        DecodeError,
+        Format,
         Position,
+        PositionCode,
     };
 
     const N_Z: f64 = 15.0;
@@ -170,10 +170,10 @@ mod algorithm {
     }
 
     #[inline(always)]
-    fn i(format: CprFormat) -> f64 {
+    fn i(format: Format) -> f64 {
         match format {
-            CprFormat::Even => 0.0,
-            CprFormat::Odd => 1.0,
+            Format::Even => 0.0,
+            Format::Odd => 1.0,
         }
     }
 
@@ -181,7 +181,7 @@ mod algorithm {
     ///
     /// A.1.7, page A-55 (905)
     #[derive(Clone, Copy, Debug)]
-    pub struct CprAlgorithm {
+    pub struct Algorithm {
         /// Number of bits used to encode a position coordinate
         pub nb: u8,
 
@@ -189,7 +189,7 @@ mod algorithm {
         pub d_factor: f64,
     }
 
-    impl CprAlgorithm {
+    impl Algorithm {
         pub const AIRBORNE: Self = Self {
             nb: 17,
             d_factor: 1.0,
@@ -202,7 +202,7 @@ mod algorithm {
 
         /// # Note
         ///
-        /// This only uses [`CprFormat::Even`].
+        /// This only uses [`Format::Even`].
         pub const INTENT: Self = Self {
             nb: 14,
             d_factor: 1.0,
@@ -214,14 +214,14 @@ mod algorithm {
         };
     }
 
-    impl CprAlgorithm {
+    impl Algorithm {
         #[inline(always)]
         fn pow_2_nb(&self) -> f64 {
             2.0f64.powi(self.nb.into())
         }
 
         #[inline(always)]
-        fn cpr_position_to_yz_xz_scaled(&self, position: CprPosition) -> [f64; 2] {
+        fn cpr_position_to_yz_xz_scaled(&self, position: PositionCode) -> [f64; 2] {
             let pow_2_nb = self.pow_2_nb();
             let yz = position.latitude.0 as f64;
             let xz = position.longitude.0 as f64;
@@ -230,7 +230,7 @@ mod algorithm {
 
         // todo: test and make public
         // note: for Self::INTENT only CprFormat::EVEN is used
-        pub(super) fn encode(&self, position: Position, format: CprFormat) -> CprPosition {
+        pub(super) fn encode(&self, position: Position, format: Format) -> PositionCode {
             let lat = position.latitude;
             let lon = position.longitude;
 
@@ -248,10 +248,10 @@ mod algorithm {
             let xz = (pow_2_nb * lon.rem_euclid(d_lon) / d_lon + 0.5).floor();
 
             // does this work? is there a better way?
-            let yz = CprCoodinate(yz.rem_euclid(pow_2_nb) as u32);
-            let xz = CprCoodinate(xz.rem_euclid(pow_2_nb) as u32);
+            let yz = CoodinateCode(yz.rem_euclid(pow_2_nb) as u32);
+            let xz = CoodinateCode(xz.rem_euclid(pow_2_nb) as u32);
 
-            CprPosition {
+            PositionCode {
                 latitude: yz,
                 longitude: xz,
             }
@@ -290,18 +290,17 @@ mod algorithm {
             }
         }
 
-        /// Decode an even and and odd CPR into latitude and longitude in
-        /// degrees.
+        /// Decode an even and and odd CPR.
         ///
         /// This might fail if the CPRs are from different zones. If you don't
         /// have both CPRs or if this function fails, you can use
-        /// [`decode_locally_umambiguous`].
+        /// [`decode_local`][Self::decode_local].
         pub fn decode_global(
             &self,
-            cpr_even: CprPosition,
-            cpr_odd: CprPosition,
-            most_recent: CprFormat,
-        ) -> Result<Position, CprDecodeError> {
+            cpr_even: PositionCode,
+            cpr_odd: PositionCode,
+            most_recent: Format,
+        ) -> Result<Position, DecodeError> {
             let [yz_even, xz_even] = self.cpr_position_to_yz_xz_scaled(cpr_even);
             let [yz_odd, xz_odd] = self.cpr_position_to_yz_xz_scaled(cpr_odd);
 
@@ -323,7 +322,7 @@ mod algorithm {
             // nl is a whole number and we only use floats for convenience. the value is
             // floored though, so using `==` should be fine.
             if nl_r_lat_even != nl_r_lat_odd {
-                return Err(CprDecodeError::MessagesFromDifferentLongitudeZones {
+                return Err(DecodeError::MessagesFromDifferentLongitudeZones {
                     nl_lat_even: nl_r_lat_even,
                     nl_lat_odd: nl_r_lat_odd,
                 });
@@ -331,8 +330,8 @@ mod algorithm {
 
             // select most recent
             let (r_lat, nl_r_lat, xz, n) = match most_recent {
-                CprFormat::Even => (r_lat_even, nl_r_lat_even, xz_even, nl_r_lat_even.max(1.0)),
-                CprFormat::Odd => {
+                Format::Even => (r_lat_even, nl_r_lat_even, xz_even, nl_r_lat_even.max(1.0)),
+                Format::Odd => {
                     (
                         r_lat_odd,
                         nl_r_lat_odd,
@@ -361,21 +360,21 @@ mod algorithm {
 #[derive(Clone, Copy, Debug)]
 struct DecoderBin<T> {
     vertical_status: VerticalStatus,
-    position: CprPosition,
+    position: PositionCode,
     time: T,
 }
 
 /// CPR decoder
 ///
 /// This is generic over the type of time you use. All `T` needs to support is
-/// comparisions (i.e [`Ord`][std::cmp::Ord]).
+/// comparisions (i.e [`Ord`]).
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CprDecoder<T> {
+pub struct Decoder<T> {
     even: Option<DecoderBin<T>>,
     odd: Option<DecoderBin<T>>,
 }
 
-impl<T: Ord> CprDecoder<T> {
+impl<T: Ord> Decoder<T> {
     /// Push a CPR value into the decoder.
     ///
     /// This buffers the CPR value and tries to decode it. It will first try to
@@ -398,8 +397,8 @@ impl<T: Ord> CprDecoder<T> {
 
         // first we get the bin for this CPR, and the other one
         let (mut this_bin, other_bin) = match cpr.format {
-            CprFormat::Even => (&mut self.even, &self.odd),
-            CprFormat::Odd => (&mut self.odd, &self.even),
+            Format::Even => (&mut self.even, &self.odd),
+            Format::Odd => (&mut self.odd, &self.even),
         };
 
         // if we have another bin, check which one is more recent
@@ -434,8 +433,8 @@ impl<T: Ord> CprDecoder<T> {
         }
 
         let algorithm = match vertical_status {
-            VerticalStatus::Airborne => CprAlgorithm::AIRBORNE,
-            VerticalStatus::Ground => CprAlgorithm::SURFACE,
+            VerticalStatus::Airborne => &Algorithm::AIRBORNE,
+            VerticalStatus::Ground => &Algorithm::SURFACE,
         };
 
         // now we can decode :)
@@ -449,8 +448,8 @@ impl<T: Ord> CprDecoder<T> {
                 // first check if both CPRs are either airborne or surface
                 if other_bin.vertical_status == vertical_status {
                     let (even, odd) = match cpr.format {
-                        CprFormat::Even => (cpr.position, other_bin.position),
-                        CprFormat::Odd => (other_bin.position, cpr.position),
+                        Format::Even => (cpr.position, other_bin.position),
+                        Format::Odd => (other_bin.position, cpr.position),
                     };
 
                     algorithm.decode_global(even, odd, most_recent).ok()
@@ -475,21 +474,21 @@ mod tests {
     use approx::assert_abs_diff_eq;
 
     use super::{
+        Algorithm,
+        CoodinateCode,
         Cpr,
-        CprAlgorithm,
-        CprCoodinate,
-        CprFormat,
-        CprPosition,
+        Format,
         Position,
+        PositionCode,
     };
 
-    const EXAMPLE_EVEN: CprPosition = CprPosition {
-        latitude: CprCoodinate::from_u32_unchecked(0b10110101101001000),
-        longitude: CprCoodinate::from_u32_unchecked(0b01100100010101100),
+    const EXAMPLE_EVEN: PositionCode = PositionCode {
+        latitude: CoodinateCode::from_u32_unchecked(0b10110101101001000),
+        longitude: CoodinateCode::from_u32_unchecked(0b01100100010101100),
     };
-    const EXAMPLE_ODD: CprPosition = CprPosition {
-        latitude: CprCoodinate::from_u32_unchecked(0b10010000110101110),
-        longitude: CprCoodinate::from_u32_unchecked(0b01100010000010010),
+    const EXAMPLE_ODD: PositionCode = PositionCode {
+        latitude: CoodinateCode::from_u32_unchecked(0b10010000110101110),
+        longitude: CoodinateCode::from_u32_unchecked(0b01100010000010010),
     };
     const EXAMPLE_POSITION: Position = Position {
         latitude: 52.2572,
@@ -502,8 +501,8 @@ mod tests {
 
     #[test]
     fn decode_globally_unambigious_decoding_example() {
-        let position = CprAlgorithm::AIRBORNE
-            .decode_global(EXAMPLE_EVEN, EXAMPLE_ODD, CprFormat::Even)
+        let position = Algorithm::AIRBORNE
+            .decode_global(EXAMPLE_EVEN, EXAMPLE_ODD, Format::Even)
             .unwrap();
 
         assert_abs_diff_eq!(
@@ -521,11 +520,11 @@ mod tests {
     #[test]
     fn decode_locally_umambiguous_decoding_example() {
         let cpr = Cpr {
-            format: CprFormat::Even,
+            format: Format::Even,
             position: EXAMPLE_EVEN,
         };
 
-        let position = CprAlgorithm::AIRBORNE.decode_local(cpr, EXAMPLE_REFERENCE);
+        let position = Algorithm::AIRBORNE.decode_local(cpr, EXAMPLE_REFERENCE);
 
         assert_abs_diff_eq!(
             position.latitude,
@@ -550,13 +549,26 @@ mod tests {
 
     #[test]
     fn global_round_trip_airborne() {
-        let cpr_even = CprAlgorithm::AIRBORNE.encode(P1, CprFormat::Even);
-        let cpr_odd = CprAlgorithm::AIRBORNE.encode(P2, CprFormat::Odd);
+        let cpr_even = Algorithm::AIRBORNE.encode(P1, Format::Even);
+        let cpr_odd = Algorithm::AIRBORNE.encode(P2, Format::Odd);
 
-        let position = CprAlgorithm::AIRBORNE
-            .decode_global(cpr_even, cpr_odd, CprFormat::Odd)
+        let position = Algorithm::AIRBORNE
+            .decode_global(cpr_even, cpr_odd, Format::Odd)
             .unwrap();
         assert_abs_diff_eq!(position.latitude, P2.latitude, epsilon = 0.001);
         assert_abs_diff_eq!(position.longitude, P2.longitude, epsilon = 0.001);
+    }
+
+    fn local_round_trip_airborne() {
+        let position = Algorithm::AIRBORNE.encode(P1, Format::Even);
+        let position = Algorithm::AIRBORNE.decode_local(
+            Cpr {
+                format: Format::Even,
+                position,
+            },
+            P2,
+        );
+        assert_abs_diff_eq!(position.latitude, P1.latitude, epsilon = 0.001);
+        assert_abs_diff_eq!(position.longitude, P1.longitude, epsilon = 0.001);
     }
 }

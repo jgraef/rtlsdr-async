@@ -59,7 +59,7 @@ pub enum Error {
 ///
 /// The [original BEAST documentation][1] also references "Legacy 12MHz" and
 /// "GPS" timestamps. This should be bit 4 in
-/// [`Packet::DipSwitches`][output::Packet::DipSwitches].
+/// [`OutputPacket::DipSwitches`][output::OutputPacket::DipSwitches].
 ///
 /// ## HULC
 ///

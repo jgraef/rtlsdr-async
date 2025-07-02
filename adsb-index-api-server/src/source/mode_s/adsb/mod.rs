@@ -1,3 +1,5 @@
+//! ADS-B messages
+
 pub mod cpr;
 
 use std::{
@@ -156,17 +158,23 @@ pub struct SurfacePosition {
 
 impl SurfacePosition {
     pub fn decode<B: Buf>(buffer: &mut B, _type_code: u8, bits_6_to_8: u8) -> Self {
+        // byte       *0        0        1
+        // bit  01234567 01234567 01234567
+        //      .....aaa aaaabccc ccccd...
+        // rest of bits is cpr
+
         let bytes: [u8; 6] = buffer.get_bytes();
+
+        let a = (bits_6_to_8 << 4) | (bytes[0] >> 4);
+        let b = bytes[0] & 0b0000_1000 != 0;
+        let c = (bytes[0] << 4) | (bytes[1] >> 4);
+        let d = bytes[1] & 0b0000_1000 != 0;
+
         let cpr = decode_frame_aligned_cpr(&bytes[1..]);
         Self {
-            movement: Movement((bits_6_to_8 << 4) | (bytes[0] >> 4)),
-            ground_track: if bytes[0] & 0b00001000 == 0 {
-                None
-            }
-            else {
-                Some(GroundTrack((bytes[0] << 5) | (bytes[1] >> 4)))
-            },
-            time: bytes[1] & 0b00001000 != 0,
+            movement: Movement(a),
+            ground_track: b.then(|| GroundTrack(c)),
+            time: d,
             cpr,
         }
     }
@@ -203,10 +211,12 @@ impl NoPosition {
         }
     }
     pub fn altitude(&self) -> Option<Altitude> {
-        self.encoded_altitude.decode(AltitudeType::Barometric)
+        // this is barometric (page 52)
+        self.encoded_altitude.decode().map(Altitude::Barometric)
     }
 }
 
+/// 2.2.3.2.3
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AirbornePosition {
     pub altitude_type: AltitudeType,
@@ -227,14 +237,16 @@ impl AirbornePosition {
             altitude_type: AltitudeType::from_type_code(type_code),
             surveillance_status: SurveillanceStatus(bits_6_to_8 >> 1),
             single_antenna_flag: bits_6_to_8 & 0b1 == 1,
-            encoded_altitude: AltitudeCode(u16::from(bytes[0] << 4) | u16::from(bytes[1] >> 4)),
+            encoded_altitude: AltitudeCode((u16::from(bytes[0]) << 4) | u16::from(bytes[1] >> 4)),
             time: bytes[2] & 0b00001000 != 0,
             cpr: decode_frame_aligned_cpr(&bytes[1..]),
         }
     }
 
     pub fn altitude(&self) -> Option<Altitude> {
-        self.encoded_altitude.decode(self.altitude_type)
+        self.encoded_altitude
+            .decode()
+            .map(|altitude| self.altitude_type.altitude(altitude))
     }
 }
 
@@ -244,7 +256,7 @@ pub struct AirborneVelocity {
     pub intent_change_flag: bool,
     /// deprecated
     pub ifr_capability_flag: bool,
-    pub navigation_uncertainty_category: NavigationUncertaintyCategory,
+    pub nac_v: NacV,
     pub velocity_type: VelocityType,
     pub vertical_rate: VerticalRate,
     /// deprecated
@@ -262,129 +274,90 @@ impl AirborneVelocity {
         // bit         01234567 01234567 01234567 01234567 01234567 01234567
         // field       abcccdee eeeeeeee fggggggg ggghijjj jjjjjjkk lmmmmmmm
 
-        // a
-        let intent_change_flag = bytes[0] & 0b10000000 != 0;
-        // b
-        let ifr_capability_flag = bytes[0] & 0b01000000 != 0;
-        // c
-        let navigation_uncertainty_category =
-            NavigationUncertaintyCategory((bytes[0] & 0b00111000) >> 3);
+        let a = bytes[0] & 0b1000_0000 != 0;
+        let b = bytes[0] & 0b0100_0000 != 0;
+        let c = (bytes[0] & 0b0011_1000) >> 3;
+        let d = bytes[0] & 0b0000_0100 != 0;
+        let e = (u16::from(bytes[0] & 0b1100_0000) << 3) | u16::from(bytes[1]);
+        let f = bytes[2] & 0b1000_0000 != 0;
+        let g = (u16::from(bytes[2] & 0b0111_1111) << 3) | u16::from(bytes[3] >> 5);
+        let h = bytes[3] & 0b0001_0000 != 0;
+        let i = bytes[3] & 0b0000_1000 != 0;
+        let j = (u16::from(bytes[3] & 0b0000_0111) << 6) | u16::from(bytes[4] >> 2);
+        let k = bytes[4] & 0b0000_0011;
+        let l = bytes[5] & 0b1000_0000 != 0;
+        let m = bytes[5] & 0b011_11111;
 
-        // decode d, e, f, g now, because we need them for both subtypes
-        let d = bytes[0] & 0b00000100 != 0;
-        let e = (u16::from(bytes[0] & 0b11000000) << 8) | u16::from(bytes[1]);
-        let f = bytes[2] & 0b1000000 != 0;
-        let g = (u16::from(bytes[2] & 0b01111111) << 3) | u16::from(bytes[3] >> 5);
         let velocity = |v| (v != 0).then(|| Velocity(v));
 
         // sub-type specific
         let velocity_type = match sub_type {
             1 | 2 => {
                 // ground speed
-
-                // d
-                let direction_east_west = if d {
-                    DirectionEastWest::EastToWest
-                }
-                else {
-                    DirectionEastWest::WestToEast
-                };
-                // e
-                let velocity_east_west = velocity(e);
-
-                // f
-                let direction_north_south = if f {
-                    DirectionNorthSouth::NorthToSouth
-                }
-                else {
-                    DirectionNorthSouth::SouthToNorth
-                };
-                // g
-                let velocity_north_south = velocity(g);
-
                 VelocityType::GroundSpeed(GroundSpeed {
-                    direction_east_west,
-                    velocity_east_west,
-                    direction_north_south,
-                    velocity_north_south,
+                    direction_east_west: if d {
+                        DirectionEastWest::EastToWest
+                    }
+                    else {
+                        DirectionEastWest::WestToEast
+                    },
+                    velocity_east_west: velocity(e),
+                    direction_north_south: if f {
+                        DirectionNorthSouth::NorthToSouth
+                    }
+                    else {
+                        DirectionNorthSouth::SouthToNorth
+                    },
+                    velocity_north_south: velocity(g),
                 })
             }
             3 | 4 => {
                 // airspeed
-
-                let magnetic_heading = d.then(|| MagneticHeading(e));
-                let airspeed_type = if f {
-                    AirspeedType::True
-                }
-                else {
-                    AirspeedType::Indicated
-                };
-                let airspeed_value = velocity(g);
-
                 VelocityType::Airspeed(Airspeed {
-                    magnetic_heading,
-                    airspeed_type,
-                    airspeed_value,
+                    magnetic_heading: d.then(|| MagneticHeading(e)),
+                    airspeed_type: if f {
+                        AirspeedType::True
+                    }
+                    else {
+                        AirspeedType::Indicated
+                    },
+                    airspeed_value: velocity(g),
                 })
             }
             _ => panic!("Invalid sub type for AirborneVelocity: {}", sub_type),
         };
 
-        // h
-        let vertical_rate_source = if bytes[3] & 0b00010000 == 0 {
-            VerticalRateSource::Gnss
-        }
-        else {
-            VerticalRateSource::Barometric
-        };
-
-        // i
-        let vertical_rate_sign = if bytes[3] & 0b00001000 == 0 {
-            VerticalRateSign::Up
-        }
-        else {
-            VerticalRateSign::Down
-        };
-
-        // j
-        let j = (u16::from(bytes[3]) << 6) | u16::from(bytes[4] >> 2);
-        let vertical_rate_value = (j != 0).then(|| VerticalRateValue(j));
-
-        let vertical_rate = VerticalRate {
-            source: vertical_rate_source,
-            sign: vertical_rate_sign,
-            value: vertical_rate_value,
-        };
-
-        // k
-        let turn_indicator = TurnIndicator(bytes[4] & 0b00000011);
-
-        // l
-        let altitude_difference_sign = if bytes[5] & 0b10000000 == 0 {
-            AltitudeDifferenceSign::GnssAboveBarometric
-        }
-        else {
-            AltitudeDifferenceSign::GnssBelowBarometric
-        };
-
-        // m
-        let m = bytes[5] & 0b01111111;
-        let altitude_difference_value = (m != 0).then(|| AltitudeDifferenceValue(m));
-
-        let altitude_difference = AltitudeDifference {
-            sign: altitude_difference_sign,
-            value: altitude_difference_value,
-        };
-
         Self {
             supersonic,
-            intent_change_flag,
-            ifr_capability_flag,
-            navigation_uncertainty_category,
+            intent_change_flag: a,
+            ifr_capability_flag: b,
+            nac_v: NacV(c),
             velocity_type,
-            vertical_rate,
-            turn_indicator,
-            altitude_difference,
+            vertical_rate: VerticalRate {
+                source: if h {
+                    VerticalRateSource::Barometric
+                }
+                else {
+                    VerticalRateSource::Gnss
+                },
+                sign: if i {
+                    VerticalRateSign::Down
+                }
+                else {
+                    VerticalRateSign::Up
+                },
+                value: (j != 0).then(|| VerticalRateValue(j)),
+            },
+            turn_indicator: TurnIndicator(k),
+            altitude_difference: AltitudeDifference {
+                sign: if l {
+                    AltitudeDifferenceSign::GnssBelowBarometric
+                }
+                else {
+                    AltitudeDifferenceSign::GnssAboveBarometric
+                },
+                value: (m != 0).then(|| AltitudeDifferenceValue(m)),
+            },
         }
     }
 }
@@ -541,26 +514,23 @@ impl TcasResolutionAdvisoryBroadcast {
 
         let bytes: [u8; 6] = buffer.get_bytes();
 
-        let active_resolution_advisories =
-            ActiveResolutionAdvisories((u16::from(bytes[0]) << 6) | u16::from(bytes[1] >> 2));
-        let racs_record = RacsRecord((bytes[1] << 2) | (bytes[2] >> 6));
-        let ra_terminated = bytes[2] & 0b00100000 != 0;
-        let multiple_thread_encounter = bytes[2] & 0b00010000 != 0;
-        let threat_type_indicator = ThreatTypeIndicator((bytes[2] & 0b00001100) >> 2);
-        let threat_identity_data = ThreatIdentityData(
-            (u32::from(bytes[2] & 0b11) << 24)
-                | (u32::from(bytes[3]) << 16)
-                | (u32::from(bytes[4]) << 8)
-                | u32::from(bytes[5]),
-        );
+        let a = (u16::from(bytes[0]) << 6) | u16::from(bytes[1] >> 2);
+        let b = (bytes[1] << 2) | (bytes[2] >> 6);
+        let c = bytes[2] & 0b00100000 != 0;
+        let d = bytes[2] & 0b00010000 != 0;
+        let e = (bytes[2] & 0b00001100) >> 2;
+        let f = (u32::from(bytes[2] & 0b11) << 24)
+            | (u32::from(bytes[3]) << 16)
+            | (u32::from(bytes[4]) << 8)
+            | u32::from(bytes[5]);
 
         Self {
-            active_resolution_advisories,
-            racs_record,
-            ra_terminated,
-            multiple_thread_encounter,
-            threat_type_indicator,
-            threat_identity_data,
+            active_resolution_advisories: ActiveResolutionAdvisories(a),
+            racs_record: RacsRecord(b),
+            ra_terminated: c,
+            multiple_thread_encounter: d,
+            threat_type_indicator: ThreatTypeIndicator(e),
+            threat_identity_data: ThreatIdentityData(f),
         }
     }
 }
@@ -1689,6 +1659,10 @@ impl AltitudeType {
             _ => panic!("invalid type code: {}", type_code),
         }
     }
+
+    pub fn altitude(&self, altitude: i32) -> Altitude {
+        Altitude::from_type_and_value(*self, altitude)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1732,7 +1706,7 @@ impl Debug for SurveillanceStatus {
 
 /// 12-bit altitude code
 ///
-/// page 59
+/// 2.2.3.2.3.4.3 page 58
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AltitudeCode(u16);
 
@@ -1754,64 +1728,88 @@ impl AltitudeCode {
         self.0
     }
 
-    pub fn decode(&self, altitude_type: AltitudeType) -> Option<Altitude> {
-        // note: 11 bits altitude with 25 feet resolution and -1000 feet offset gives a
-        // max value of 50175, so we need a i32 for the decoded altitude
+    /// Decodes the altitude into feet.
+    pub fn decode(&self) -> Option<i32> {
+        // [This][1] says the 12 bits are the height in meters for GNSS.
+        // This is unlikely as it can't encode anything above 4095 meters then.
+        //
+        // MOPS doesn't say this is encoded any different than barometric. It doesn't
+        // even mention which unit. So is it encoded just like barometric and in ft?
+        // Both adsb_deku and readsb decode it that way.
+        //
+        // [1]: https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html
 
         // todo: adsb_deku considers AC=0 (and AC=0xfff?) to be invalid, but is it?
-        if self.0 == 0 {
+        if self.0 == 0 || self.0 == 0xfff {
             None
         }
         else {
+            // note: 11 bits altitude with 25 feet resolution and -1000 feet offset gives a
+            // max value of 50175, so we need a i32 for the decoded altitude
+
             let q_bit = self.0 & 0b000000010000 != 0;
 
-            if q_bit {
+            let altitude = if q_bit {
                 // the altitude in 25 feet increments (this removes the Q bit)
-                let value = i32::from((self.0 >> 5) | (self.0 & 0b1111));
-                Some(Altitude {
-                    altitude_type,
-                    altitude: value * 25 - 1000,
-                })
+                // bit  0123456789ab
+                //      aaaaaaaqaaaa
+
+                let value = i32::from(((self.0 & 0b1111_1110_0000) >> 1) | (self.0 & 0b1111));
+                value * 25 - 1000
             }
             else {
                 // encoded using gillham code in 100 foot increments
                 let value = decode_gillham_ac12(self.0);
-                Some(Altitude {
-                    altitude_type,
-                    altitude: i32::from(value) * 100 - 1200,
-                })
-            }
+                i32::from(value) * 100 - 1200
+            };
+
+            Some(altitude)
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Altitude {
-    pub altitude_type: AltitudeType,
-    pub altitude: i32,
+pub enum Altitude {
+    /// Barometric altitude in feet
+    Barometric(i32),
+    /// GNSS altitude in feet
+    Gnss(i32),
 }
 
 impl Altitude {
-    pub fn unit(&self) -> AltitudeUnit {
-        match self.altitude_type {
-            AltitudeType::Barometric => AltitudeUnit::Feet,
-            AltitudeType::Gnss => AltitudeUnit::Meter,
+    pub fn ty(&self) -> AltitudeType {
+        match self {
+            Altitude::Barometric(_) => AltitudeType::Barometric,
+            Altitude::Gnss(_) => AltitudeType::Gnss,
         }
     }
 
-    pub fn as_meter(&self) -> f64 {
-        let a = self.altitude as f64;
-        match self.altitude_type {
-            AltitudeType::Barometric => 0.3048 * a,
-            AltitudeType::Gnss => a,
+    pub fn barometric(&self) -> Option<i32> {
+        match self {
+            Altitude::Barometric(altitude) => Some(*altitude),
+            Altitude::Gnss(_) => None,
         }
     }
 
-    pub fn as_ft(&self) -> f64 {
-        let a = self.altitude as f64;
-        match self.altitude_type {
-            AltitudeType::Barometric => a,
-            AltitudeType::Gnss => 3.28084 * a,
+    pub fn gnss(&self) -> Option<i32> {
+        match self {
+            Altitude::Barometric(_) => None,
+            Altitude::Gnss(altitude) => Some(*altitude),
+        }
+    }
+
+    pub fn any(&self) -> i32 {
+        match self {
+            Altitude::Barometric(altitude) => *altitude,
+            Altitude::Gnss(altitude) => *altitude,
+        }
+    }
+
+    /// Create [`Altitude`] from [`AltitudeType`] and altitude value in feet.
+    pub fn from_type_and_value(altitude_type: AltitudeType, value: i32) -> Self {
+        match altitude_type {
+            AltitudeType::Barometric => Altitude::Barometric(value),
+            AltitudeType::Gnss => Altitude::Gnss(value),
         }
     }
 }
@@ -1952,6 +1950,17 @@ pub struct VerticalRate {
     pub value: Option<VerticalRateValue>,
 }
 
+impl VerticalRate {
+    /// Decode as ft/min with positive being up.
+    pub fn as_ft_per_min(&self) -> Option<i16> {
+        let mut v = i16::try_from(self.value?.as_ft_per_min()).unwrap();
+        if matches!(self.sign, VerticalRateSign::Down) {
+            v = -v;
+        }
+        Some(v)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum VerticalRateSource {
     Barometric,
@@ -1964,6 +1973,7 @@ pub enum VerticalRateSign {
     Down,
 }
 
+// 9 bit vertical rate without sign
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VerticalRateValue(u16);
 
@@ -2030,28 +2040,6 @@ pub struct AltitudeDifference {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NavigationUncertaintyCategory(u8);
-
-impl NavigationUncertaintyCategory {
-    pub const fn from_u8_unchecked(byte: u8) -> Self {
-        Self(byte)
-    }
-
-    pub const fn from_u8(byte: u8) -> Option<Self> {
-        if byte & 0b11111000 == 0 && byte != 0 {
-            Some(Self(byte))
-        }
-        else {
-            None
-        }
-    }
-
-    pub fn as_u8(&self) -> u8 {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TurnIndicator(u8);
 
 impl TurnIndicator {
@@ -2070,5 +2058,125 @@ impl TurnIndicator {
 
     pub fn as_u8(&self) -> u8 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::source::mode_s::{
+        ExtendedSquitter,
+        Frame,
+        adsb::{
+            AltitudeCode,
+            AltitudeDifferenceSign,
+            DirectionEastWest,
+            DirectionNorthSouth,
+            Message,
+            NacV,
+            TurnIndicator,
+            Velocity,
+            VelocityType,
+            VerticalRateSign,
+            VerticalRateSource,
+            VerticalRateValue,
+            cpr,
+        },
+    };
+
+    #[test]
+    fn it_decodes_ac12() {
+        // from example: https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html
+
+        let ac = AltitudeCode::from_u16(0xc38).expect("invalid AC12");
+        assert_eq!(ac.decode().expect("decode failed"), 38000);
+    }
+
+    #[test]
+    fn it_decodes_airborne_position_barometric() {
+        // from adsb_deku
+        // first 12 bit of "\xc3\x82" is 0xc38 which is the altitude code.
+        let bytes = b"\x8D\x40\x62\x1D\x58\xC3\x82\xD6\x90\xC8\xAC\x28\x63\xA7";
+        let frame = Frame::decode(&mut &bytes[..]).unwrap();
+        match frame {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                adsb_message: Message::AirbornePosition(position),
+                ..
+            }) => {
+                assert_eq!(
+                    position
+                        .altitude()
+                        .expect("no altitude")
+                        .barometric()
+                        .expect("not barometric"),
+                    38000
+                );
+                assert_eq!(position.cpr.position.latitude.as_u32(), 93000);
+                assert_eq!(position.cpr.position.longitude.as_u32(), 51372);
+                assert_eq!(position.cpr.format, cpr::Format::Even);
+            }
+            _ => panic!("unexpected frame: {frame:?}"),
+        }
+    }
+
+    #[test]
+    fn it_decodes_airborne_velocity() {
+        // byte               0        1        2        3        4        5
+        // bit         01234567 01234567 01234567 01234567 01234567 01234567
+        // field       abcccdee eeeeeeee fggggggg ggghijjj jjjjjjkk lmmmmmmm
+        //    10011001 00100101 00000001 00101001 01111000 00000100 10000100
+        // sub_type=1 -> GroundSpeed, supersonic=false
+        //
+
+        // from adsb_deku, but fixed
+        let bytes = b"\x8d\xa3\xd4\x25\x99\x25\x01\x29\x78\x04\x84\x71\x2c\x50";
+        let frame = Frame::decode(&mut &bytes[..]).unwrap();
+        match frame {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                adsb_message: Message::AirborneVelocity(velocity),
+                ..
+            }) => {
+                assert!(!velocity.supersonic);
+                assert!(!velocity.intent_change_flag); // a
+                assert!(!velocity.ifr_capability_flag); // b
+                assert_eq!(velocity.nac_v, NacV(0b100)); // c
+
+                match velocity.velocity_type {
+                    VelocityType::GroundSpeed(ground_speed) => {
+                        assert_eq!(
+                            ground_speed.direction_east_west,
+                            DirectionEastWest::EastToWest
+                        ); // d
+                        assert_eq!(ground_speed.velocity_east_west, Some(Velocity(1))); // e
+                        assert_eq!(
+                            ground_speed.direction_north_south,
+                            DirectionNorthSouth::SouthToNorth
+                        ); // f
+                        assert_eq!(ground_speed.velocity_north_south, Some(Velocity(331))); // g
+
+                        assert_eq!(ground_speed.velocity_east_west.unwrap().as_knots(false), 0);
+                        assert_eq!(
+                            ground_speed.velocity_north_south.unwrap().as_knots(false),
+                            330
+                        );
+                    }
+                    _ => panic!("expected ground speed"),
+                }
+
+                assert_eq!(
+                    velocity.vertical_rate.source,
+                    VerticalRateSource::Barometric
+                );
+                assert_eq!(velocity.vertical_rate.sign, VerticalRateSign::Down);
+                assert_eq!(velocity.vertical_rate.value, Some(VerticalRateValue(1)));
+                assert_eq!(velocity.vertical_rate.as_ft_per_min().unwrap(), 0);
+
+                assert_eq!(velocity.turn_indicator, TurnIndicator(0));
+                assert_eq!(
+                    velocity.altitude_difference.sign,
+                    AltitudeDifferenceSign::GnssBelowBarometric
+                );
+            }
+            _ => panic!("unexpected frame: {frame:?}"),
+        }
     }
 }
