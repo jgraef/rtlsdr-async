@@ -9,7 +9,7 @@
 /// Decodes 13-bit identity code as is used in DF5, DF21, and Mode A?? (not
 /// ADSB)
 ///
-/// ```
+/// ```plain
 /// input:  C1 A1 C2 A2 C4 A4 ID B1 D1 B2 D2 B4 D4
 /// output: A4 A2 A1 B4 B2 B1 C4 C2 C1 D4 D2 D1
 /// ```

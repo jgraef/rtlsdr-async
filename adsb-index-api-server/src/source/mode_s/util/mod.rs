@@ -12,9 +12,9 @@ use crate::source::mode_s::{
     VerticalStatus,
     adsb::cpr::{
         Cpr,
+        CprCoodinate,
         CprFormat,
         CprPosition,
-        CprValue,
     },
 };
 
@@ -110,12 +110,12 @@ pub fn decode_frame_aligned_altitude_or_identity_code(bytes: &[u8]) -> u16 {
 pub fn decode_frame_aligned_cpr(bytes: &[u8]) -> Cpr {
     let format = CprFormat::from_bit(bytes[0] & 0b00000100 != 0);
     let position = CprPosition {
-        latitude: CprValue::from_u32_unchecked(
+        latitude: CprCoodinate::from_u32_unchecked(
             (u32::from(bytes[0] & 0b10) << 15)
                 | (u32::from(bytes[1]) << 7)
                 | u32::from(bytes[2] >> 1),
         ),
-        longitude: CprValue::from_u32_unchecked(
+        longitude: CprCoodinate::from_u32_unchecked(
             (u32::from(bytes[2] & 0b1) << 16) | (u32::from(bytes[3]) << 8) | u32::from(bytes[4]),
         ),
     };

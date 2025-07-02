@@ -12,16 +12,11 @@
 //!  - surface: reference position needs to be within 45 NM of the actual
 //!    position.
 //!
-//! A.1.7 page A-55(905)
-//!
 //! <https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html>
 
 use std::ops::Not;
 
-pub use self::decode::{
-    decode_globally_unambigious_airborne,
-    decode_locally_umambiguous_airborne,
-};
+pub use self::algorithm::CprAlgorithm;
 use crate::source::mode_s::VerticalStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,15 +71,15 @@ impl Not for CprFormat {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CprPosition {
-    pub latitude: CprValue,
-    pub longitude: CprValue,
+    pub latitude: CprCoodinate,
+    pub longitude: CprCoodinate,
 }
 
 /// 17 bit encoded latitude/longitude
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CprValue(u32);
+pub struct CprCoodinate(u32);
 
-impl CprValue {
+impl CprCoodinate {
     pub const fn from_u32_unchecked(word: u32) -> Self {
         Self(word)
     }
@@ -115,7 +110,7 @@ pub enum CprDecodeError {
     MessagesFromDifferentLongitudeZones { nl_lat_even: f64, nl_lat_odd: f64 },
 }
 
-mod decode {
+mod algorithm {
     use std::f64::consts::{
         FRAC_PI_2,
         PI,
@@ -124,10 +119,10 @@ mod decode {
 
     use super::{
         Cpr,
+        CprCoodinate,
         CprDecodeError,
         CprFormat,
         CprPosition,
-        CprValue,
         Position,
     };
 
@@ -139,6 +134,8 @@ mod decode {
     // mod(x, y) = x.rem_euclid(y)
     // arccos(x) = x.acos()
 
+    // note: MOPS says this equation is too slow for real-time. it is fast enough
+    // for us lol
     pub fn n_l(lat: f64) -> f64 {
         if lat == 0.0 {
             59.0
@@ -151,130 +148,212 @@ mod decode {
         }
         else {
             let a = 1.0 - (FRAC_PI_2 / N_Z).cos();
-            let b = (PI * lat / 180.0).cos().powi(2);
+            let b = (PI * lat.abs() / 180.0).cos().powi(2);
             (TAU / (1.0 - a / b).acos()).floor()
         }
     }
 
-    /// scale cpr latitude longitude to a fraction [0, 1]
     #[inline(always)]
-    fn lat_lon_cpr(x: CprValue) -> f64 {
-        (x.0 as f64) / 131072.0
+    fn fix_lat(mut lat: f64) -> f64 {
+        if lat >= 270.0 {
+            lat -= 360.0;
+        }
+        lat
     }
 
     #[inline(always)]
-    fn adjust_lat(lat: &mut f64) {
-        if *lat >= 270.0 {
-            *lat -= 360.0;
-        }
-    }
-
-    /// Decode an even and and odd CPR into latitude and longitude in degrees.
-    ///
-    /// This might fail if the CPRs are from different zones. If you don't have
-    /// both CPRs or if this function fails, you can use
-    /// [`decode_locally_umambiguous`].
-    pub fn decode_globally_unambigious_airborne(
-        cpr_even: CprPosition,
-        cpr_odd: CprPosition,
-        most_recent: CprFormat,
-    ) -> Result<Position, CprDecodeError> {
-        let lat_cpr_even = lat_lon_cpr(cpr_even.latitude);
-        let lat_cpr_odd = lat_lon_cpr(cpr_odd.latitude);
-
-        // latitude zone index
-        let j = (59.0 * lat_cpr_even - 60.0 * lat_cpr_odd + 0.5).floor();
-
-        let mut lat_even = D_LAT_EVEN * (j.rem_euclid(60.0) + lat_cpr_even);
-        let mut lat_odd = D_LAT_ODD * (j.rem_euclid(59.0) + lat_cpr_odd);
-
-        adjust_lat(&mut lat_even);
-        adjust_lat(&mut lat_odd);
-
-        let nl_lat_even = n_l(lat_even);
-        let nl_lat_odd = n_l(lat_odd);
-
-        if nl_lat_even != nl_lat_odd {
-            return Err(CprDecodeError::MessagesFromDifferentLongitudeZones {
-                nl_lat_even,
-                nl_lat_odd,
-            });
-        }
-
-        let (lat, nl_lat) = match most_recent {
-            CprFormat::Even => (lat_even, nl_lat_even),
-            CprFormat::Odd => (lat_odd, nl_lat_odd),
-        };
-
-        let lon_cpr_even = lat_lon_cpr(cpr_even.longitude);
-        let lon_cpr_odd = lat_lon_cpr(cpr_odd.longitude);
-
-        // longitude index
-        let m = (lon_cpr_even * (nl_lat - 1.0) - lon_cpr_odd * nl_lat + 0.5).floor();
-
-        // number of longitude zones
-        let n_even = nl_lat.max(1.0);
-        let n_odd = n_l(lat - 1.0).max(1.0);
-
-        // size of longitude zones
-        let d_lon_even = 360.0 / n_even;
-        let d_lon_odd = 360.0 / n_odd;
-
-        let lon_even = d_lon_even * (m.rem_euclid(n_even) + lon_cpr_even);
-        let lon_odd = d_lon_odd * (m.rem_euclid(n_odd) + lon_cpr_odd);
-
-        let mut lon = match most_recent {
-            CprFormat::Even => lon_even,
-            CprFormat::Odd => lon_odd,
-        };
-
+    fn fix_lon(mut lon: f64) -> f64 {
         if lon >= 180.0 {
             lon -= 360.0;
         }
-
-        Ok(Position {
-            latitude: lat,
-            longitude: lon,
-        })
+        lon
     }
 
-    /// Decode an a single CPR using a reference position.
-    ///
-    /// This will always work, but the reference position should be recent.
-    pub fn decode_locally_umambiguous_airborne(
-        field: Cpr,
-        reference_position: &Position,
-    ) -> Position {
-        let i = match field.format {
+    #[inline(always)]
+    fn i(format: CprFormat) -> f64 {
+        match format {
             CprFormat::Even => 0.0,
             CprFormat::Odd => 1.0,
+        }
+    }
+
+    /// Algorithm for encoding and decoding CPR positions
+    ///
+    /// A.1.7, page A-55 (905)
+    #[derive(Clone, Copy, Debug)]
+    pub struct CprAlgorithm {
+        /// Number of bits used to encode a position coordinate
+        pub nb: u8,
+
+        /// `D_lat`/`D_lon` factor. `1.0` for airborne, `0.25` for latitude
+        pub d_factor: f64,
+    }
+
+    impl CprAlgorithm {
+        pub const AIRBORNE: Self = Self {
+            nb: 17,
+            d_factor: 1.0,
         };
 
-        let lat_ref = reference_position.latitude;
-        let lon_ref = reference_position.longitude;
+        pub const SURFACE: Self = Self {
+            nb: 19,
+            d_factor: 0.25,
+        };
 
-        let lat_cpr = lat_lon_cpr(field.position.latitude);
-        let lon_cpr = lat_lon_cpr(field.position.longitude);
+        /// # Note
+        ///
+        /// This only uses [`CprFormat::Even`].
+        pub const INTENT: Self = Self {
+            nb: 14,
+            d_factor: 1.0,
+        };
 
-        let d_lat = 360.0 / (4.0 * N_Z - i);
+        pub const TISB_COARSE_AIRBORNE: Self = Self {
+            nb: 12,
+            d_factor: 1.0,
+        };
+    }
 
-        // latitude zone index
-        let j =
-            (lat_ref / d_lat).floor() + (lat_ref.rem_euclid(d_lat) / d_lat - lat_cpr + 0.5).floor();
+    impl CprAlgorithm {
+        #[inline(always)]
+        fn pow_2_nb(&self) -> f64 {
+            2.0f64.powi(self.nb.into())
+        }
 
-        let lat = d_lat * (j + lat_cpr);
+        #[inline(always)]
+        fn cpr_position_to_yz_xz_scaled(&self, position: CprPosition) -> [f64; 2] {
+            let pow_2_nb = self.pow_2_nb();
+            let yz = position.latitude.0 as f64;
+            let xz = position.longitude.0 as f64;
+            [yz / pow_2_nb, xz / pow_2_nb]
+        }
 
-        let d_lon = 360.0 / (n_l(lat) - i).max(1.0);
+        // todo: test and make public
+        // note: for Self::INTENT only CprFormat::EVEN is used
+        pub(super) fn encode(&self, position: Position, format: CprFormat) -> CprPosition {
+            let lat = position.latitude;
+            let lon = position.longitude;
 
-        // longitude zone index
-        let m =
-            (lon_ref / d_lon).floor() + (lon_ref.rem_euclid(d_lon) / d_lon - lon_cpr + 0.5).floor();
+            let i = i(format);
+            // MOPS doesn't scale D_lat and D_lon differently for surface?
+            let d_lat = 360.0 / (4.0 * N_Z - i);
 
-        let lon = d_lon * (m + lon_cpr);
+            let pow_2_nb = self.pow_2_nb();
+            let yz = (pow_2_nb * lat.rem_euclid(d_lat) / d_lat + 0.5).floor();
+            let r_lat = d_lat * (yz / pow_2_nb + (lat / d_lat).floor());
 
-        Position {
-            latitude: lat,
-            longitude: lon,
+            // MOPS doesn't scale D_lat and D_lon differently for surface?
+            let d_lon = 360.0 / (n_l(r_lat) - i).max(1.0);
+
+            let xz = (pow_2_nb * lon.rem_euclid(d_lon) / d_lon + 0.5).floor();
+
+            // does this work? is there a better way?
+            let yz = CprCoodinate(yz.rem_euclid(pow_2_nb) as u32);
+            let xz = CprCoodinate(xz.rem_euclid(pow_2_nb) as u32);
+
+            CprPosition {
+                latitude: yz,
+                longitude: xz,
+            }
+        }
+
+        /// Decode an a single CPR using a reference position.
+        ///
+        /// This will always work, but the reference position must be close to
+        /// the actual position (see module documentation).
+        pub fn decode_local(&self, field: Cpr, reference_position: Position) -> Position {
+            let i = i(field.format);
+
+            let lat_s = reference_position.latitude;
+            let lon_s = reference_position.longitude;
+
+            let [yz, xz] = self.cpr_position_to_yz_xz_scaled(field.position);
+
+            let d_lat = self.d_factor * 360.0 / (4.0 * N_Z - i);
+
+            // latitude zone index
+            let j = (lat_s / d_lat).floor() + (0.5 + lat_s.rem_euclid(d_lat) / d_lat - yz).floor();
+
+            let r_lat = d_lat * (j + yz);
+
+            let d_lon = 360.0 / (n_l(r_lat) - i).max(1.0);
+
+            // longitude zone index
+            let m = (lon_s / d_lon).floor() + (0.5 + lon_s.rem_euclid(d_lon) / d_lon - xz).floor();
+
+            let r_lon = d_lon * (m + xz);
+            let r_lon = fix_lon(r_lon);
+
+            Position {
+                latitude: r_lat,
+                longitude: r_lon,
+            }
+        }
+
+        /// Decode an even and and odd CPR into latitude and longitude in
+        /// degrees.
+        ///
+        /// This might fail if the CPRs are from different zones. If you don't
+        /// have both CPRs or if this function fails, you can use
+        /// [`decode_locally_umambiguous`].
+        pub fn decode_global(
+            &self,
+            cpr_even: CprPosition,
+            cpr_odd: CprPosition,
+            most_recent: CprFormat,
+        ) -> Result<Position, CprDecodeError> {
+            let [yz_even, xz_even] = self.cpr_position_to_yz_xz_scaled(cpr_even);
+            let [yz_odd, xz_odd] = self.cpr_position_to_yz_xz_scaled(cpr_odd);
+
+            let d_lat_even = self.d_factor * 360.0 / (4.0 * N_Z);
+            let d_lat_odd = self.d_factor * 360.0 / (4.0 * N_Z - 1.0);
+
+            // latitude zone index
+            let j = (59.0 * yz_even - 60.0 * yz_odd + 0.5).floor();
+
+            let r_lat_even = d_lat_even * (j.rem_euclid(60.0) + yz_even);
+            let r_lat_odd = d_lat_odd * (j.rem_euclid(59.0) + yz_odd);
+
+            let r_lat_even = fix_lat(r_lat_even);
+            let r_lat_odd = fix_lat(r_lat_odd);
+
+            let nl_r_lat_even = n_l(r_lat_even);
+            let nl_r_lat_odd = n_l(r_lat_odd);
+
+            // nl is a whole number and we only use floats for convenience. the value is
+            // floored though, so using `==` should be fine.
+            if nl_r_lat_even != nl_r_lat_odd {
+                return Err(CprDecodeError::MessagesFromDifferentLongitudeZones {
+                    nl_lat_even: nl_r_lat_even,
+                    nl_lat_odd: nl_r_lat_odd,
+                });
+            }
+
+            // select most recent
+            let (r_lat, nl_r_lat, xz, n) = match most_recent {
+                CprFormat::Even => (r_lat_even, nl_r_lat_even, xz_even, nl_r_lat_even.max(1.0)),
+                CprFormat::Odd => {
+                    (
+                        r_lat_odd,
+                        nl_r_lat_odd,
+                        xz_odd,
+                        (nl_r_lat_odd - 1.0).max(1.0),
+                    )
+                }
+            };
+
+            let d_lon = 360.0 / n;
+
+            // longitude index
+            let m = (xz_even * (nl_r_lat - 1.0) - xz_odd * nl_r_lat + 0.5).floor();
+
+            let r_lon = d_lon * (m.rem_euclid(n) + xz);
+            let r_lon = fix_lon(r_lon);
+
+            Ok(Position {
+                latitude: r_lat,
+                longitude: r_lon,
+            })
         }
     }
 }
@@ -302,6 +381,12 @@ impl<T: Ord> CprDecoder<T> {
     /// This buffers the CPR value and tries to decode it. It will first try to
     /// decode it globally with a buffered CPR value. If that fails, it will
     /// decode it with a reference position, if available.
+    ///
+    /// The vertical status needs to be provided because the decoding algorithm
+    /// depends on it.
+    ///
+    /// The provided local reference needs to be close to the actual position
+    /// (see module documentation).
     pub fn push(
         &mut self,
         cpr: Cpr,
@@ -348,6 +433,11 @@ impl<T: Ord> CprDecoder<T> {
             });
         }
 
+        let algorithm = match vertical_status {
+            VerticalStatus::Airborne => CprAlgorithm::AIRBORNE,
+            VerticalStatus::Ground => CprAlgorithm::SURFACE,
+        };
+
         // now we can decode :)
         // note: we don't filter stale CPRs here, since the decoding will just fail if
         // its from different zones.
@@ -363,7 +453,7 @@ impl<T: Ord> CprDecoder<T> {
                         CprFormat::Odd => (other_bin.position, cpr.position),
                     };
 
-                    decode_globally_unambigious_airborne(even, odd, most_recent).ok()
+                    algorithm.decode_global(even, odd, most_recent).ok()
                 }
                 else {
                     None
@@ -374,7 +464,7 @@ impl<T: Ord> CprDecoder<T> {
                 // (different zones or vertical status)
                 reference.map(|reference| {
                     // decode with reference
-                    decode_locally_umambiguous_airborne(cpr, &reference)
+                    algorithm.decode_local(cpr, reference)
                 })
             })
     }
@@ -386,55 +476,87 @@ mod tests {
 
     use super::{
         Cpr,
+        CprAlgorithm,
+        CprCoodinate,
         CprFormat,
         CprPosition,
-        CprValue,
         Position,
-        decode::decode_locally_umambiguous_airborne,
-        decode_globally_unambigious_airborne,
+    };
+
+    const EXAMPLE_EVEN: CprPosition = CprPosition {
+        latitude: CprCoodinate::from_u32_unchecked(0b10110101101001000),
+        longitude: CprCoodinate::from_u32_unchecked(0b01100100010101100),
+    };
+    const EXAMPLE_ODD: CprPosition = CprPosition {
+        latitude: CprCoodinate::from_u32_unchecked(0b10010000110101110),
+        longitude: CprCoodinate::from_u32_unchecked(0b01100010000010010),
+    };
+    const EXAMPLE_POSITION: Position = Position {
+        latitude: 52.2572,
+        longitude: 3.91937,
+    };
+    const EXAMPLE_REFERENCE: Position = Position {
+        latitude: 52.258,
+        longitude: 3.918,
     };
 
     #[test]
     fn decode_globally_unambigious_decoding_example() {
-        let cpr_even = CprPosition {
-            latitude: CprValue::from_u32_unchecked(0b10110101101001000),
-            longitude: CprValue::from_u32_unchecked(0b01100100010101100),
-        };
-        let cpr_odd = CprPosition {
-            latitude: CprValue::from_u32_unchecked(0b10010000110101110),
-            longitude: CprValue::from_u32_unchecked(0b01100010000010010),
-        };
+        let position = CprAlgorithm::AIRBORNE
+            .decode_global(EXAMPLE_EVEN, EXAMPLE_ODD, CprFormat::Even)
+            .unwrap();
 
-        let Position {
-            latitude,
-            longitude,
-        } = decode_globally_unambigious_airborne(cpr_even, cpr_odd, CprFormat::Even).unwrap();
-
-        assert_abs_diff_eq!(latitude, 52.2572, epsilon = 0.001);
-        assert_abs_diff_eq!(longitude, 3.91937, epsilon = 0.001);
+        assert_abs_diff_eq!(
+            position.latitude,
+            EXAMPLE_POSITION.latitude,
+            epsilon = 0.001
+        );
+        assert_abs_diff_eq!(
+            position.longitude,
+            EXAMPLE_POSITION.longitude,
+            epsilon = 0.001
+        );
     }
 
     #[test]
     fn decode_locally_umambiguous_decoding_example() {
         let cpr = Cpr {
             format: CprFormat::Even,
-            position: CprPosition {
-                latitude: CprValue::from_u32_unchecked(0b10110101101001000),
-                longitude: CprValue::from_u32_unchecked(0b01100100010101100),
-            },
+            position: EXAMPLE_EVEN,
         };
 
-        let reference_position = Position {
-            latitude: 52.258,
-            longitude: 3.918,
-        };
+        let position = CprAlgorithm::AIRBORNE.decode_local(cpr, EXAMPLE_REFERENCE);
 
-        let Position {
-            latitude,
-            longitude,
-        } = decode_locally_umambiguous_airborne(cpr, &reference_position);
+        assert_abs_diff_eq!(
+            position.latitude,
+            EXAMPLE_POSITION.latitude,
+            epsilon = 0.001
+        );
+        assert_abs_diff_eq!(
+            position.longitude,
+            EXAMPLE_POSITION.longitude,
+            epsilon = 0.001
+        );
+    }
 
-        assert_abs_diff_eq!(latitude, 52.2572, epsilon = 0.001);
-        assert_abs_diff_eq!(longitude, 3.91937, epsilon = 0.001);
+    const P1: Position = Position {
+        latitude: 48.729381,
+        longitude: 2.916458,
+    };
+    const P2: Position = Position {
+        latitude: 48.715478,
+        longitude: 2.943659,
+    };
+
+    #[test]
+    fn global_round_trip_airborne() {
+        let cpr_even = CprAlgorithm::AIRBORNE.encode(P1, CprFormat::Even);
+        let cpr_odd = CprAlgorithm::AIRBORNE.encode(P2, CprFormat::Odd);
+
+        let position = CprAlgorithm::AIRBORNE
+            .decode_global(cpr_even, cpr_odd, CprFormat::Odd)
+            .unwrap();
+        assert_abs_diff_eq!(position.latitude, P2.latitude, epsilon = 0.001);
+        assert_abs_diff_eq!(position.longitude, P2.longitude, epsilon = 0.001);
     }
 }
