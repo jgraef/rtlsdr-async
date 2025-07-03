@@ -1,0 +1,408 @@
+//! <https://www.radartutorial.eu/13.ssr/sr24.en.html>
+//! <https://www.idc-online.com/technical_references/pdfs/electronic_engineering/Mode_S_Reply_Encoding.pdf>
+
+use std::{
+    pin::Pin,
+    task::{
+        Context,
+        Poll,
+    },
+};
+
+use futures_util::Stream;
+use pin_project_lite::pin_project;
+
+use crate::source::{
+    mode_s,
+    rtlsdr::{
+        AsyncReadSamples,
+        Cursor,
+        IqSample,
+        Magnitude,
+        RawFrame,
+    },
+};
+
+/// Preamble: 8 µs / 16 samples
+const PREAMBLE_SAMPLES: usize = 16;
+
+enum DemodFail {
+    NotEnoughSamples,
+    Invalid,
+}
+
+#[derive(Debug, Default)]
+pub struct Demodulator {
+    pub quality: Quality,
+}
+
+impl Demodulator {
+    pub fn new(quality: Quality) -> Self {
+        Self { quality }
+    }
+
+    pub fn next(&self, cursor: &mut Cursor) -> Option<RawFrame> {
+        while find_preamble(cursor) {
+            //tracing::debug!(?cursor.position, "found preamble");
+
+            let mut frame_cursor = *cursor;
+
+            match self.read_frame(&mut frame_cursor) {
+                Ok(frame) => {
+                    // found a frame!
+                    // set main cursor to the position of the frame cursor
+                    cursor.position = frame_cursor.position;
+                    return Some(frame);
+                }
+                Err(DemodFail::NotEnoughSamples) => {
+                    // cursor position should remain at start of preamble
+                    return None;
+                }
+                Err(DemodFail::Invalid) => {
+                    // find next preamble starting from end of previous preamble
+                    // so the main cursor stays unchanged and we do nothing here
+                    let n = frame_cursor.position - cursor.position;
+                    if n > 16 {
+                        tracing::debug!("error after {} samples / {} bytes", n, n / 16);
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("exhausted samples");
+
+        None
+    }
+
+    fn read_frame(&self, cursor: &mut Cursor) -> Result<RawFrame, DemodFail> {
+        let first_byte = self.read_byte(cursor)?;
+
+        let df =
+            mode_s::DownlinkFormat::from_u8(first_byte >> 3).map_err(|_| DemodFail::Invalid)?;
+        println!("df={df:?}");
+        let n = df.frame_length();
+
+        let frame = match n {
+            mode_s::LENGTH_SHORT => {
+                RawFrame::ModeSShort {
+                    data: self.read_frame_rest(first_byte, cursor)?,
+                }
+            }
+            mode_s::LENGTH_LONG => {
+                RawFrame::ModeSLong {
+                    data: self.read_frame_rest(first_byte, cursor)?,
+                }
+            }
+            _ => panic!("Invalid frame length: {n}"),
+        };
+
+        Ok(frame)
+    }
+
+    fn read_frame_rest<const N: usize>(
+        &self,
+        first_byte: u8,
+        cursor: &mut Cursor,
+    ) -> Result<[u8; N], DemodFail> {
+        let mut data = [0u8; N];
+        data[0] = first_byte;
+        for i in 1..N {
+            data[i] = self.read_byte(cursor)?;
+        }
+        Ok(data)
+    }
+
+    fn read_bit(&self, cursor: &mut Cursor) -> Option<bool> {
+        // these should exist, since we read a preamble first
+        let a = cursor.samples[cursor.position - 2];
+        let b = cursor.samples[cursor.position - 1];
+
+        let c = cursor.samples[cursor.position];
+        let d = cursor.samples[cursor.position + 1];
+
+        cursor.advance(2);
+
+        let bit_p = a > b;
+        let bit = c > d;
+
+        // todo: this could be implemented with a few bitmask really
+
+        match self.quality {
+            Quality::NoChecks => Some(bit),
+            Quality::HalfBit => {
+                if bit && bit_p && b > c {
+                    None
+                }
+                else if !bit && !bit_p && b < c {
+                    None
+                }
+                else {
+                    Some(bit)
+                }
+            }
+            Quality::OneBit => {
+                if bit && bit_p && c > b {
+                    Some(true)
+                }
+                else if bit && !bit_p && d < b {
+                    Some(true)
+                }
+                else if !bit && bit_p && d > b {
+                    Some(false)
+                }
+                else if !bit && !bit_p && c < b {
+                    Some(false)
+                }
+                else {
+                    None
+                }
+            }
+            Quality::TwoBits => {
+                if bit && bit_p && c > b && d < a {
+                    Some(true)
+                }
+                else if bit && !bit_p && c > a && d < b {
+                    Some(true)
+                }
+                else if !bit && bit_p && c < a && d > b {
+                    Some(false)
+                }
+                else if !bit && !bit_p && c < b && d > a {
+                    Some(false)
+                }
+                else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn read_byte(&self, cursor: &mut Cursor) -> Result<u8, DemodFail> {
+        let mut byte = 0;
+
+        if cursor.remaining().len() < 2 * 8 {
+            Err(DemodFail::NotEnoughSamples)
+        }
+        else {
+            for _ in 0..8 {
+                byte <<= 1;
+                if self.read_bit(cursor).ok_or(DemodFail::Invalid)? {
+                    byte |= 1;
+                }
+            }
+
+            //tracing::debug!("read byte: 0x{byte:02x}");
+            Ok(byte)
+        }
+    }
+}
+
+fn is_preamble(samples: &[u16]) -> bool {
+    let mut low: u16 = 0;
+    let mut high: u16 = u16::MAX;
+
+    for i in 0..PREAMBLE_SAMPLES {
+        match i {
+            0 | 2 | 7 | 9 => {
+                high = samples[i];
+            }
+            _ => {
+                low = samples[i];
+            }
+        }
+
+        if high <= low {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn find_preamble(cursor: &mut Cursor) -> bool {
+    let remaining = cursor.remaining();
+
+    if let Some(max) = remaining.len().checked_sub(PREAMBLE_SAMPLES) {
+        for i in 0..max {
+            if is_preamble(&remaining[i..]) {
+                cursor.advance(i + PREAMBLE_SAMPLES);
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Quality {
+    NoChecks,
+    HalfBit,
+    #[default]
+    OneBit,
+    TwoBits,
+}
+
+pin_project! {
+    #[derive(Debug)]
+    pub struct DemodulateStream<S> {
+        #[pin]
+        stream: S,
+        demodulator: Demodulator,
+        buffer: Vec<Magnitude>,
+        read_pos: usize,
+        write_pos: usize,
+        num_samples: usize,
+    }
+}
+
+impl<S> DemodulateStream<S> {
+    pub fn new(stream: S, quality: Quality, buffer_size: usize) -> Self {
+        Self {
+            stream,
+            demodulator: Demodulator::new(quality),
+            buffer: vec![0; buffer_size],
+            read_pos: 0,
+            write_pos: 0,
+            num_samples: 0,
+        }
+    }
+}
+
+impl<S: AsyncReadSamples> Stream for DemodulateStream<S> {
+    type Item = Result<RawFrame, S::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            let this = self.as_mut().project();
+
+            tracing::debug!(
+                read_pos = *this.read_pos,
+                write_pos = *this.write_pos,
+                num_samples = *this.num_samples
+            );
+
+            if *this.read_pos < *this.num_samples {
+                let mut cursor = Cursor {
+                    samples: &this.buffer[..*this.num_samples],
+                    position: *this.read_pos,
+                };
+
+                if let Some(frame) = this.demodulator.next(&mut cursor) {
+                    *this.read_pos = cursor.position;
+                    return Poll::Ready(Some(Ok(frame)));
+                }
+                else {
+                    let position = cursor.position;
+                    this.buffer.copy_within(position..*this.num_samples, 0);
+                    *this.write_pos = *this.num_samples - position;
+                    *this.read_pos = 0;
+                    *this.num_samples = 0;
+                }
+            }
+            else {
+                let buffer = &mut this.buffer[*this.write_pos..];
+
+                // we use the same buffer!
+                let iq_buffer: &mut [IqSample] = bytemuck::cast_slice_mut(buffer);
+
+                match this.stream.poll_read_samples(cx, iq_buffer) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
+                    Poll::Ready(Ok(num_samples)) => {
+                        if num_samples == 0 {
+                            return Poll::Ready(None);
+                        }
+
+                        magnitude_of_samples_inplace(&mut iq_buffer[..num_samples]);
+                        *this.num_samples = *this.write_pos + num_samples;
+                        *this.read_pos = 0;
+                        *this.write_pos = 0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// computes magnitudes of samples and replaces samples inplace with u16 of
+/// magnitude
+fn magnitude_of_samples_inplace(samples: &mut [IqSample]) {
+    // todo: is this fast?
+    // if not, we can just remove [`Sample`] and use u16. a custom magnitude
+    // function will take care of it.
+    for sample in samples.iter_mut() {
+        let magnitude = sample.magnitude();
+        *sample = bytemuck::cast(magnitude);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::source::rtlsdr::{
+        Cursor,
+        demodulator::{
+            Demodulator,
+            Quality,
+        },
+    };
+
+    fn modulate(data: &[u8], mut sample: impl FnMut(bool) -> u16) -> Vec<u16> {
+        let mut samples = vec![];
+
+        // 0, 2, 7, 9 are high
+        let mut preamble: u16 = 0b1010_0001_0100_0000;
+        for _ in 0..16 {
+            if preamble & 0x8000 == 0 {
+                samples.push(sample(false));
+            }
+            else {
+                samples.push(sample(true));
+            }
+            preamble <<= 1;
+        }
+
+        for mut byte in data.iter().copied() {
+            for _ in 0..8 {
+                if byte & 0x80 == 0 {
+                    // bit=0 raising edge
+                    samples.push(sample(false));
+                    samples.push(sample(true));
+                }
+                else {
+                    // bit=1 falling edge
+                    samples.push(sample(true));
+                    samples.push(sample(false));
+                }
+                byte <<= 1;
+            }
+        }
+
+        samples
+    }
+
+    fn best_signal(signal: bool) -> u16 {
+        if signal { u16::MAX } else { 0 }
+    }
+
+    #[test]
+    fn it_demodulates_a_frame() {
+        let input = b"\x8d\x40\x74\xb5\x23\x15\xa6\x76\xdd\x13\xa0\x66\x29\x67";
+
+        let samples = modulate(input, best_signal);
+
+        let demodulator = Demodulator::new(Quality::NoChecks);
+        let mut cursor = Cursor {
+            samples: &samples[..],
+            position: 0,
+        };
+
+        let frame = demodulator.next(&mut cursor).expect("no frame demodulated");
+        match frame {
+            crate::source::rtlsdr::RawFrame::ModeSLong { data } => {
+                assert_eq!(&data, input);
+            }
+            _ => panic!("unexpected frame: {:?}", frame),
+        }
+    }
+}

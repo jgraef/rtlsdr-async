@@ -19,9 +19,7 @@ use adsb_index_api_server::{
             self,
             adsb,
         },
-        rtl_tcp::{
-            self,
-        },
+        rtlsdr,
         sbs,
         tar1090_db::update_aircraft_db,
     },
@@ -151,15 +149,29 @@ async fn main() -> Result<(), Error> {
         }
         Command::RtlSdr => {
             let mut frame_processor = FrameProcessor::default();
-            let mut rtl_adsb = rtl_tcp::RtlAdsbCommand::new().await?;
 
-            while let Some(data) = rtl_adsb.next().await? {
+            //let mut rtl_adsb = rtl_tcp::RtlAdsbCommand::new().await?;
+            let mut rtl_tcp = rtlsdr::tcp::RtlTcpClient::connect("localhost:1234").await?;
+            println!("{:#?}", rtl_tcp.dongle_info());
+            rtl_tcp
+                .set_center_frequency(rtlsdr::DOWNLINK_FREQUENCY)
+                .await?;
+            rtl_tcp.set_sample_rate(rtlsdr::SAMPLE_RATE).await?;
+            rtl_tcp.set_gain(rtlsdr::tcp::Gain::Auto).await?;
+
+            let mut rtl_adsb = rtlsdr::demodulator::DemodulateStream::new(
+                rtl_tcp,
+                rtlsdr::demodulator::Quality::NoChecks,
+                0x800000,
+            );
+
+            while let Some(data) = rtl_adsb.try_next().await? {
                 match data {
-                    rtl_tcp::RawFrame::ModeAc { data } => todo!("mode ac: {data:?}"),
-                    rtl_tcp::RawFrame::ModeSShort { data } => {
+                    rtlsdr::RawFrame::ModeAc { data } => todo!("mode ac: {data:?}"),
+                    rtlsdr::RawFrame::ModeSShort { data } => {
                         frame_processor.handle_mode_s_data(&data)
                     }
-                    rtl_tcp::RawFrame::ModeSLong { data } => {
+                    rtlsdr::RawFrame::ModeSLong { data } => {
                         frame_processor.handle_mode_s_data(&data)
                     }
                 }

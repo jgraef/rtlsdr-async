@@ -16,7 +16,6 @@ use bytes::Buf;
 
 use crate::{
     source::mode_s::{
-        AltitudeUnit,
         DecodeError,
         adsb::cpr::Cpr,
         util::{
@@ -2220,7 +2219,7 @@ mod tests {
                 assert_eq!(status.mode_a_code, expected_squawk);
 
                 // the message we used for testing here has some stuff in the reserved bits ????
-                assert_eq!(status.reserved, 2521924289);
+                assert_eq!(status.reserved, 0xc1825196);
             }
             _ => panic!("unexpected frame: {frame:?}"),
         }
