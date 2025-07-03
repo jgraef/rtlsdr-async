@@ -92,9 +92,12 @@ impl PacketType for OutputPacketType {
             b'2' => Self::ModeSShort,
             b'3' => Self::ModeSLong,
             b'4' => Self::DipSwitches,
-            b'P' => Self::Ping,
-            0xe3 => Self::ReceiverId,
-            _ => Self::Unknown(byte),
+            //b'P' => Self::Ping, // todo: uppercase P is an input command
+            //0xe3 => Self::ReceiverId,
+            _ => {
+                todo!("unknown packet type: {:02x}", byte);
+                //Self::Unknown(byte)
+            },
         }
     }
 
@@ -374,7 +377,6 @@ impl PacketDecoder {
 
                     // we didn't read the packet type yet, so this byte is it.
                     self.packet_type = Some(OutputPacketType::from_byte(byte));
-                    tracing::trace!(?self.packet_type);
                 }
             }
             else if byte == ESCAPE {

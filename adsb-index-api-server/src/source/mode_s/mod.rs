@@ -1365,9 +1365,14 @@ pub struct CommD {
 
 #[cfg(test)]
 mod tests {
+    use adsb_index_api_types::IcaoAddress;
+
     use crate::source::mode_s::{
         AltitudeCode,
         AltitudeUnit,
+        Capability,
+        ExtendedSquitter,
+        Frame,
     };
 
     #[test]
@@ -1402,5 +1407,22 @@ mod tests {
         assert_eq!(ac13_decode_to_feet(1343), 7775);
         assert_eq!(ac13_decode_to_feet(2332), 13700);
         assert_eq!(ac13_decode_to_feet(5560), 34000);
+    }
+
+    #[test]
+    fn it_decodes_extended_squitter() {
+        let bytes = b"\x8d\x40\x74\xb5\x23\x15\xa6\x76\xdd\x13\xa0\x66\x29\x67";
+        let frame = Frame::decode(&mut &bytes[..]).unwrap();
+        match frame {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                capabilities,
+                address_announced,
+                ..
+            }) => {
+                assert_eq!(capabilities, Capability::LEVEL2_AIRBORNE);
+                assert_eq!(address_announced, IcaoAddress::from_u32_unchecked(0x4074b5));
+            }
+            _ => panic!("unexpected frame: {frame:?}"),
+        }
     }
 }

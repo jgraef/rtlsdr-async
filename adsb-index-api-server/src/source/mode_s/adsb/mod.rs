@@ -34,7 +34,6 @@ use crate::{
 /// Reference page 39
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Message {
-    NoPosition(NoPosition),
     AircraftIdentification(AircraftIdentification),
     SurfacePosition(SurfacePosition),
     AirbornePosition(AirbornePosition),
@@ -73,7 +72,6 @@ impl Message {
         };
 
         let message = match type_code {
-            0 => Self::NoPosition(NoPosition::decode(buffer, bits_6_to_8)),
             1..=4 => {
                 Self::AircraftIdentification(AircraftIdentification::decode(
                     buffer,
@@ -82,7 +80,7 @@ impl Message {
                 ))
             }
             5..=8 => Self::SurfacePosition(SurfacePosition::decode(buffer, type_code, bits_6_to_8)),
-            9..=18 | 20..=22 => {
+            0 | 9..=18 | 20..=22 => {
                 Self::AirbornePosition(AirbornePosition::decode(buffer, type_code, bits_6_to_8))
             }
             19 => {
@@ -167,7 +165,7 @@ impl SurfacePosition {
 
         let a = (bits_6_to_8 << 4) | (bytes[0] >> 4);
         let b = bytes[0] & 0b0000_1000 != 0;
-        let c = (bytes[0] << 4) | (bytes[1] >> 4);
+        let c = ((bytes[0] & 0b0000_0111) << 4) | (bytes[1] >> 4);
         let d = bytes[1] & 0b0000_1000 != 0;
 
         let cpr = decode_frame_aligned_cpr(&bytes[1..]);
@@ -180,73 +178,42 @@ impl SurfacePosition {
     }
 }
 
-/// FIXME: I'm getting implausible altitude readings with this. Would be nice if
-/// this message was specified better.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NoPosition {
-    // todo: is this present in NoPosition?
-    pub surveillance_status: SurveillanceStatus,
-    // todo: is this present in NoPosition?
-    pub single_antenna_flag: bool,
-
-    // todo: An `AltitudeCode` doesn't have information on the AltitudeType attached, but we know
-    // it to be barometric
-    pub encoded_altitude: AltitudeCode,
-
-    // todo: is this present in NoPosition?
-    pub time: bool,
-}
-
-impl NoPosition {
-    pub fn decode<B: Buf>(buffer: &mut B, bits_6_to_8: u8) -> Self {
-        let bytes: [u8; 6] = buffer.get_bytes();
-
-        Self {
-            //       -1        0        1        2        3        4        5
-            // tttttssS aaaaaaaa aaaaTFxx xxxxxxxx xxxxxxxx xxxxxxxx xxxxxxxx
-            surveillance_status: SurveillanceStatus(bits_6_to_8 >> 1),
-            single_antenna_flag: bits_6_to_8 & 0b1 == 1,
-            encoded_altitude: AltitudeCode(u16::from(bytes[0] << 4) | u16::from(bytes[1] >> 4)),
-            time: bytes[2] & 0b00001000 != 0,
-        }
-    }
-    pub fn altitude(&self) -> Option<Altitude> {
-        // this is barometric (page 52)
-        self.encoded_altitude.decode().map(Altitude::Barometric)
-    }
-}
-
 /// 2.2.3.2.3
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AirbornePosition {
     pub altitude_type: AltitudeType,
     pub surveillance_status: SurveillanceStatus,
     pub single_antenna_flag: bool,
-    pub encoded_altitude: AltitudeCode,
+    pub altitude_code: Option<AltitudeCode>,
     pub time: bool,
-    pub cpr: Cpr,
+    pub cpr: Option<Cpr>,
 }
 
 impl AirbornePosition {
     pub fn decode<B: Buf>(buffer: &mut B, type_code: u8, bits_6_to_8: u8) -> Self {
         let bytes: [u8; 6] = buffer.get_bytes();
 
+        //       -1        0        1
+        // .....aab cccccccc ccccb...
+        // rest is cpr if available
+        let a = bits_6_to_8 >> 1;
+        let b = bits_6_to_8 & 0b1 == 1;
+        let c = (u16::from(bytes[0]) << 4) | u16::from(bytes[1] >> 4);
+        let d = bytes[2] & 0b00001000 != 0;
+
         Self {
-            //       -1        0        1        2        3        4        5
-            // tttttssS aaaaaaaa aaaaTFll llllllll lllllllL LLLLLLLL LLLLLLLL
             altitude_type: AltitudeType::from_type_code(type_code),
-            surveillance_status: SurveillanceStatus(bits_6_to_8 >> 1),
-            single_antenna_flag: bits_6_to_8 & 0b1 == 1,
-            encoded_altitude: AltitudeCode((u16::from(bytes[0]) << 4) | u16::from(bytes[1] >> 4)),
-            time: bytes[2] & 0b00001000 != 0,
-            cpr: decode_frame_aligned_cpr(&bytes[1..]),
+            surveillance_status: SurveillanceStatus(a),
+            single_antenna_flag: b,
+            altitude_code: (c != 0).then(|| AltitudeCode(c)),
+            time: d,
+            cpr: (type_code != 0).then(|| decode_frame_aligned_cpr(&bytes[1..])),
         }
     }
 
     pub fn altitude(&self) -> Option<Altitude> {
-        self.encoded_altitude
-            .decode()
-            .map(|altitude| self.altitude_type.altitude(altitude))
+        self.altitude_code
+            .map(|ac| self.altitude_type.altitude(ac.decode()))
     }
 }
 
@@ -403,7 +370,11 @@ pub struct EmergencyPriorityStatusAndModeACode {
 
 impl EmergencyPriorityStatusAndModeACode {
     pub fn decode<B: Buf>(buffer: &mut B) -> Self {
-        // tttttsss eeeiiiii iiiiiiii
+        // byte         0        1
+        // byte  01234567 01234567
+        // bit   aaabbbbb bbbbbbbb
+        // rest is reserved
+
         let bytes: [u8; 2] = buffer.get_bytes();
 
         EmergencyPriorityStatusAndModeACode {
@@ -1530,10 +1501,10 @@ impl Movement {
 impl Debug for Movement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(kt) = self.decode() {
-            write!(f, "GroundSpeed({} kt)", kt)
+            write!(f, "Movement({} kt)", kt)
         }
         else {
-            write!(f, "GroundSpeed(None)")
+            write!(f, "Movement(None)")
         }
     }
 }
@@ -1716,7 +1687,7 @@ impl AltitudeCode {
     }
 
     pub const fn from_u16(word: u16) -> Option<Self> {
-        if word & 0b1111000000000000 == 0 {
+        if word & 0b1111000000000000 == 0 && word != 0 {
             Some(Self(word))
         }
         else {
@@ -1729,7 +1700,7 @@ impl AltitudeCode {
     }
 
     /// Decodes the altitude into feet.
-    pub fn decode(&self) -> Option<i32> {
+    pub fn decode(&self) -> i32 {
         // [This][1] says the 12 bits are the height in meters for GNSS.
         // This is unlikely as it can't encode anything above 4095 meters then.
         //
@@ -1737,33 +1708,25 @@ impl AltitudeCode {
         // even mention which unit. So is it encoded just like barometric and in ft?
         // Both adsb_deku and readsb decode it that way.
         //
+        // 11 bits altitude with 25 feet resolution and -1000 feet offset gives a
+        // max value of 50175, so we need a i32 for the decoded altitude
+        //
         // [1]: https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html
 
-        // todo: adsb_deku considers AC=0 (and AC=0xfff?) to be invalid, but is it?
-        if self.0 == 0 || self.0 == 0xfff {
-            None
+        let q_bit = self.0 & 0b000000010000 != 0;
+
+        if q_bit {
+            // the altitude in 25 feet increments (this removes the Q bit)
+            // bit  0123456789ab
+            //      aaaaaaaqaaaa
+
+            let value = i32::from(((self.0 & 0b1111_1110_0000) >> 1) | (self.0 & 0b1111));
+            value * 25 - 1000
         }
         else {
-            // note: 11 bits altitude with 25 feet resolution and -1000 feet offset gives a
-            // max value of 50175, so we need a i32 for the decoded altitude
-
-            let q_bit = self.0 & 0b000000010000 != 0;
-
-            let altitude = if q_bit {
-                // the altitude in 25 feet increments (this removes the Q bit)
-                // bit  0123456789ab
-                //      aaaaaaaqaaaa
-
-                let value = i32::from(((self.0 & 0b1111_1110_0000) >> 1) | (self.0 & 0b1111));
-                value * 25 - 1000
-            }
-            else {
-                // encoded using gillham code in 100 foot increments
-                let value = decode_gillham_ac12(self.0);
-                i32::from(value) * 100 - 1200
-            };
-
-            Some(altitude)
+            // encoded using gillham code in 100 foot increments
+            let value = decode_gillham_ac12(self.0);
+            i32::from(value) * 100 - 1200
         }
     }
 }
@@ -2063,14 +2026,19 @@ impl TurnIndicator {
 
 #[cfg(test)]
 mod tests {
+    use adsb_index_api_types::Squawk;
+    use approx::assert_abs_diff_eq;
+
     use crate::source::mode_s::{
         ExtendedSquitter,
         Frame,
         adsb::{
+            AircraftStatus,
             AltitudeCode,
             AltitudeDifferenceSign,
             DirectionEastWest,
             DirectionNorthSouth,
+            EmergencyPriorityStatus,
             Message,
             NacV,
             TurnIndicator,
@@ -2079,8 +2047,10 @@ mod tests {
             VerticalRateSign,
             VerticalRateSource,
             VerticalRateValue,
+            WakeVortexCategory,
             cpr,
         },
+        util::gillham::decode_gillham_id13,
     };
 
     #[test]
@@ -2088,7 +2058,7 @@ mod tests {
         // from example: https://mode-s.org/1090mhz/content/ads-b/3-airborne-position.html
 
         let ac = AltitudeCode::from_u16(0xc38).expect("invalid AC12");
-        assert_eq!(ac.decode().expect("decode failed"), 38000);
+        assert_eq!(ac.decode(), 38000);
     }
 
     #[test]
@@ -2110,9 +2080,10 @@ mod tests {
                         .expect("not barometric"),
                     38000
                 );
-                assert_eq!(position.cpr.position.latitude.as_u32(), 93000);
-                assert_eq!(position.cpr.position.longitude.as_u32(), 51372);
-                assert_eq!(position.cpr.format, cpr::Format::Even);
+                let cpr = position.cpr.expect("no position");
+                assert_eq!(cpr.position.latitude.as_u32(), 93000);
+                assert_eq!(cpr.position.longitude.as_u32(), 51372);
+                assert_eq!(cpr.format, cpr::Format::Even);
             }
             _ => panic!("unexpected frame: {frame:?}"),
         }
@@ -2174,6 +2145,117 @@ mod tests {
                 assert_eq!(
                     velocity.altitude_difference.sign,
                     AltitudeDifferenceSign::GnssBelowBarometric
+                );
+            }
+            _ => panic!("unexpected frame: {frame:?}"),
+        }
+    }
+
+    #[test]
+    fn it_decodes_aircraft_identification() {
+        let bytes = b"\x8d\x40\x74\xb5\x23\x15\xa6\x76\xdd\x13\xa0\x66\x29\x67";
+        let frame = Frame::decode(&mut &bytes[..]).unwrap();
+        match frame {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                adsb_message: Message::AircraftIdentification(ident),
+                ..
+            }) => {
+                assert_eq!(ident.wake_vortex_category, WakeVortexCategory::Medium2);
+                assert_eq!(
+                    ident.callsign.decode().expect("invalid callsign").as_str(),
+                    "EZY67QN "
+                );
+            }
+            _ => panic!("unexpected frame: {frame:?}"),
+        }
+    }
+
+    #[test]
+    fn it_decodes_aircraft_status_mode_a() {
+        let bytes = b"\x8d\xa0\xda\xdb\xe1\x02\x8b\x00\x00\x00\x00\xfe\xad\x7b";
+        let frame = Frame::decode(&mut &bytes[..]).unwrap();
+        match frame {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                adsb_message:
+                    Message::AircraftStatus(AircraftStatus::EmergencyPriorityStatusAndModeACode(status)),
+                ..
+            }) => {
+                assert_eq!(
+                    status.emergency_priority_status,
+                    EmergencyPriorityStatus::NO_EMERGENCY
+                );
+                assert_eq!(status.mode_a_code, Squawk::from_u16_unchecked(0o6604));
+                assert_eq!(status.reserved, 0);
+            }
+            _ => panic!("unexpected frame: {frame:?}"),
+        }
+    }
+
+    #[test]
+    fn it_decodes_aircraft_status_emergency() {
+        let bytes = b"\x8c\x8c\x60\x2c\xe1\x65\xe5\xc1\x82\x51\x96\x55\x3f\x11";
+
+        //       01100101 11100101 11000001 10000010 01010001 10010110
+        // byte         0        1
+        // byte  01234567 01234567
+        // bit   aaabbbbb bbbbbbbb ---reserved------------------------
+
+        // emergency = 0b011 minimal fuel
+        // squawk = 0b0010111100101
+
+        // we have a test for this, so we don't have to do this manual here :3
+        let expected_squawk = Squawk::from_u16_unchecked(decode_gillham_id13(0b0010111100101));
+
+        let frame = Frame::decode(&mut &bytes[..]).unwrap();
+        match frame {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                adsb_message:
+                    Message::AircraftStatus(AircraftStatus::EmergencyPriorityStatusAndModeACode(status)),
+                ..
+            }) => {
+                assert_eq!(
+                    status.emergency_priority_status,
+                    EmergencyPriorityStatus::MINIMAL_FUEL
+                );
+                assert_eq!(status.mode_a_code, expected_squawk);
+
+                // the message we used for testing here has some stuff in the reserved bits ????
+                assert_eq!(status.reserved, 2521924289);
+            }
+            _ => panic!("unexpected frame: {frame:?}"),
+        }
+    }
+
+    #[test]
+    fn it_decodes_surface_position() {
+        // byte       -1        0        1
+        // bit  01234567 01234567 01234567
+        //      .....aaa aaaabccc ccccdeff ffffffff fffffffg gggggggg gggggggg
+        //      00111010 11101101 01110010 00100100 00010010 00010110 10001000
+        // rest of bits is cpr
+
+        let bytes = b"\x8c\x4a\xca\x15\x3a\xed\x72\x24\x12\x16\x88\x4a\xa6\x9b";
+        let frame = Frame::decode(&mut &bytes[..]).unwrap();
+
+        match frame {
+            Frame::ExtendedSquitter(ExtendedSquitter {
+                adsb_message: Message::SurfacePosition(position),
+                ..
+            }) => {
+                assert_eq!(position.movement.0, 0b0101110);
+                let ground_track = position.ground_track.expect("no ground track");
+                assert_eq!(ground_track.0, 0b1010111);
+                assert_abs_diff_eq!(ground_track.as_degrees(), 244.6875);
+                assert_abs_diff_eq!(ground_track.as_radians(), 4.270602, epsilon = 0.00001);
+
+                assert_eq!(position.cpr.format, cpr::Format::Even);
+                assert_eq!(
+                    position.cpr.position.latitude.as_u32(),
+                    0b1_0001_0010_0000_1001
+                );
+                assert_eq!(
+                    position.cpr.position.longitude.as_u32(),
+                    0b0_0001_0110_1000_1000
                 );
             }
             _ => panic!("unexpected frame: {frame:?}"),

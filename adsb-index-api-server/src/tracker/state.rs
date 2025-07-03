@@ -166,7 +166,7 @@ pub struct AircraftState {
     pub altitude_barometric: Option<Timestamped<i32>>,
 
     // in m
-    pub altitude_gnss: Option<Timestamped<u32>>,
+    pub altitude_gnss: Option<Timestamped<i32>>,
 
     // in kt
     pub ground_speed: Option<Timestamped<f64>>,
@@ -286,23 +286,18 @@ impl<'a> UpdateAircraftState<'a> {
 
     pub fn update_airborne_position(&mut self, airborne_position: &adsb::AirbornePosition) {
         // update position
-        self.update_position(&airborne_position.cpr, VerticalStatus::Ground);
+        if let Some(cpr) = &airborne_position.cpr {
+            self.update_position(cpr, VerticalStatus::Ground);
+        }
 
         // update altitude
         if let Some(altitude) = airborne_position.altitude() {
             match altitude {
                 adsb::Altitude::Barometric(altitude) => {
-                    //println!("baro altitude: 0x{:03x} -> {}",
-                    // airborne_position.encoded_altitude.as_u16(), altitude);
                     self.state.altitude_barometric.update(self.time, altitude);
                 }
                 adsb::Altitude::Gnss(altitude) => {
-                    println!(
-                        "gnss altitude: 0x{:03x} -> {}",
-                        airborne_position.encoded_altitude.as_u16(),
-                        altitude
-                    );
-                    //self.state.altitude_gnss.update(self.time, altitude);
+                    self.state.altitude_gnss.update(self.time, altitude);
                 }
             }
         }
@@ -349,8 +344,12 @@ impl<'a> UpdateAircraftState<'a> {
 
     pub fn update_position(&mut self, cpr: &cpr::Cpr, vertical_status: VerticalStatus) {
         let reference = self.state.position.as_ref().and_then(|reference| {
-            const TOO_OLD: TimeDelta = TimeDelta::seconds(10);
-            (self.time.signed_duration_since(reference.last_update) <= TOO_OLD).then_some(
+            // from MOPS appendix
+            let max_age = match vertical_status {
+                VerticalStatus::Airborne => TimeDelta::seconds(10),
+                VerticalStatus::Ground => TimeDelta::seconds(50),
+            };
+            (self.time.signed_duration_since(reference.last_update) <= max_age).then_some(
                 cpr::Position {
                     latitude: reference.value.latitude,
                     longitude: reference.value.longitude,

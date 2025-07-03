@@ -1,6 +1,8 @@
 use std::{
-    collections::HashSet,
-    fmt::Debug,
+    fmt::{
+        Debug,
+        Write as _,
+    },
     io::{
         BufWriter,
         Write,
@@ -131,6 +133,15 @@ async fn main() -> Result<(), Error> {
             let mut handle_data = |data: &[u8]| -> Result<(), Error> {
                 match mode_s::Frame::decode_and_check_checksum(&mut &data[..]) {
                     Ok(frame) => {
+                        match &frame {
+                            mode_s::Frame::ExtendedSquitter(mode_s::ExtendedSquitter {
+                                adsb_message: adsb::Message::SurfacePosition(_),
+                                ..
+                            }) => {
+                                //make_test(data, &frame);
+                            }
+                            _ => {}
+                        }
                         state.update_with_mode_s(Utc::now(), &frame);
                     }
                     Err(error) => {
@@ -144,14 +155,21 @@ async fn main() -> Result<(), Error> {
                 Ok(())
             };
 
+            todo!();
+            // todo: try sending:
+            // P
+            // 5 heartbeats
+            // WO
             args.run(beast::output::Reader::new, |_i, packet| {
                 match packet {
-                    beast::output::OutputPacket::ModeAc { .. } => {}
+                    beast::output::OutputPacket::ModeAc { data, .. } => {
+                        println!("modeac: {data:?}");
+                    }
                     beast::output::OutputPacket::ModeSLong { data, .. } => {
-                        handle_data(&data)?;
+                        //handle_data(&data)?;
                     }
                     beast::output::OutputPacket::ModeSShort { data, .. } => {
-                        handle_data(&data)?;
+                        //handle_data(&data)?;
                     }
                     _ => todo!("{packet:?}"),
                 }
@@ -259,4 +277,22 @@ impl ClientTestArgs {
 
         Ok(())
     }
+}
+
+fn make_test(data: &[u8], frame: &mode_s::Frame) {
+    let mut bytes_str = String::new();
+    let mut bits_str = String::new();
+
+    for b in data {
+        write!(&mut bytes_str, "\\x{b:02x}").unwrap();
+    }
+
+    for b in &data[4..11] {
+        write!(&mut bits_str, " {b:08b}").unwrap();
+    }
+
+    println!("//{bits_str}");
+    println!("let bytes = b\"{bytes_str}\";");
+    println!("frame: {frame:#?}");
+    todo!();
 }
