@@ -3,10 +3,6 @@ use std::{
         Debug,
         Write as _,
     },
-    io::{
-        BufWriter,
-        Write,
-    },
     path::PathBuf,
     pin::Pin,
     time::Instant,
@@ -22,6 +18,9 @@ use adsb_index_api_server::{
         mode_s::{
             self,
             adsb,
+        },
+        rtl_tcp::{
+            self,
         },
         sbs,
         tar1090_db::update_aircraft_db,
@@ -124,38 +123,9 @@ async fn main() -> Result<(), Error> {
             .await?;
         }
         Command::BeastClient(args) => {
-            let mut state = State::default();
+            let mut frame_processor = FrameProcessor::default();
 
-            let t_start = Instant::now();
-            let mut num_frames = 0;
-            let mut num_bytes = 0;
-
-            let mut handle_data = |data: &[u8]| -> Result<(), Error> {
-                match mode_s::Frame::decode_and_check_checksum(&mut &data[..]) {
-                    Ok(frame) => {
-                        match &frame {
-                            mode_s::Frame::ExtendedSquitter(mode_s::ExtendedSquitter {
-                                adsb_message: adsb::Message::SurfacePosition(_),
-                                ..
-                            }) => {
-                                //make_test(data, &frame);
-                            }
-                            _ => {}
-                        }
-                        state.update_with_mode_s(Utc::now(), &frame);
-                    }
-                    Err(error) => {
-                        tracing::error!(?error, ?data);
-                    }
-                }
-
-                num_bytes += data.len();
-                num_frames += 1;
-
-                Ok(())
-            };
-
-            todo!();
+            //todo!();
             // todo: try sending:
             // P
             // 5 heartbeats
@@ -166,10 +136,10 @@ async fn main() -> Result<(), Error> {
                         println!("modeac: {data:?}");
                     }
                     beast::output::OutputPacket::ModeSLong { data, .. } => {
-                        //handle_data(&data)?;
+                        frame_processor.handle_mode_s_data(&data)
                     }
                     beast::output::OutputPacket::ModeSShort { data, .. } => {
-                        //handle_data(&data)?;
+                        frame_processor.handle_mode_s_data(&data)
                     }
                     _ => todo!("{packet:?}"),
                 }
@@ -177,19 +147,25 @@ async fn main() -> Result<(), Error> {
             })
             .await?;
 
-            let t_elapsed = t_start.elapsed();
-            println!("{num_frames} frames and {num_bytes} bytes in {t_elapsed:?}");
-            let seconds = t_elapsed.as_secs_f32();
-            println!(
-                "{} frames/s, {} MB/s",
-                num_frames as f32 / seconds,
-                num_bytes as f32 / seconds / 1024.0 / 1024.0
-            );
+            frame_processor.finish();
+        }
+        Command::RtlSdr => {
+            let mut frame_processor = FrameProcessor::default();
+            let mut rtl_adsb = rtl_tcp::RtlAdsbCommand::new().await?;
 
-            let mut writer = BufWriter::new(std::fs::File::create("callsigns.txt")?);
-            for aircraft in state.iter_aircraft() {
-                writeln!(&mut writer, "{aircraft:#?}")?;
+            while let Some(data) = rtl_adsb.next().await? {
+                match data {
+                    rtl_tcp::RawFrame::ModeAc { data } => todo!("mode ac: {data:?}"),
+                    rtl_tcp::RawFrame::ModeSShort { data } => {
+                        frame_processor.handle_mode_s_data(&data)
+                    }
+                    rtl_tcp::RawFrame::ModeSLong { data } => {
+                        frame_processor.handle_mode_s_data(&data)
+                    }
+                }
             }
+
+            frame_processor.finish();
         }
     }
 
@@ -236,6 +212,7 @@ enum Command {
     },
     SbsClient(ClientTestArgs),
     BeastClient(ClientTestArgs),
+    RtlSdr,
 }
 
 #[derive(Debug, clap::Args)]
@@ -295,4 +272,68 @@ fn make_test(data: &[u8], frame: &mode_s::Frame) {
     println!("let bytes = b\"{bytes_str}\";");
     println!("frame: {frame:#?}");
     todo!();
+}
+
+#[derive(Debug)]
+struct FrameProcessor {
+    state: State,
+    t_start: Instant,
+    num_frames: usize,
+    num_bytes: usize,
+}
+
+impl Default for FrameProcessor {
+    fn default() -> Self {
+        Self {
+            state: Default::default(),
+            t_start: Instant::now(),
+            num_frames: 0,
+            num_bytes: 0,
+        }
+    }
+}
+
+impl FrameProcessor {
+    fn handle_mode_s_data(&mut self, data: &[u8]) {
+        match mode_s::Frame::decode_and_check_checksum(&mut &data[..]) {
+            Ok(frame) => {
+                match &frame {
+                    mode_s::Frame::ExtendedSquitter(_) => {
+                        //make_test(data, &frame);
+                        println!("{frame:#?}");
+                        println!();
+                    }
+                    _ => {}
+                }
+
+                self.state.update_with_mode_s(Utc::now(), &frame);
+                self.num_bytes += data.len();
+                self.num_frames += 1;
+            }
+            Err(error) => {
+                match &error {
+                    mode_s::DecodeError::CrcCheckFailed(_frame_with_checksum) => {}
+                    mode_s::DecodeError::InvalidDf { value: _ } => {
+                        // todo: DF-23 ??
+                    }
+                    _ => panic!("{error:?}"),
+                }
+                //tracing::error!(?error, ?data);
+            }
+        }
+    }
+
+    fn finish(self) {
+        let t_elapsed = self.t_start.elapsed();
+        println!(
+            "{} frames and {} bytes in {t_elapsed:?}",
+            self.num_frames, self.num_bytes
+        );
+        let seconds = t_elapsed.as_secs_f32();
+        println!(
+            "{} frames/s, {} MB/s",
+            self.num_frames as f32 / seconds,
+            self.num_bytes as f32 / seconds / 1024.0 / 1024.0
+        );
+    }
 }

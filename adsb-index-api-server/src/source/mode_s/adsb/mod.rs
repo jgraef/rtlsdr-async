@@ -386,7 +386,7 @@ impl EmergencyPriorityStatusAndModeACode {
                     decode_frame_aligned_altitude_or_identity_code(&bytes[..]),
                 ))
             },
-            reserved: buffer.get_u32_ne(),
+            reserved: buffer.get_u32(),
         }
     }
 
@@ -695,8 +695,8 @@ impl AircraftOperationalStatus {
             // bit   01234567 01234567 01234567 01234567 01234567 01234567
             // field aaaaaaaa aaaaaaaa bbbbbbbb bbbbbbbb cccdeeee ffgghijk
 
-            let a = buffer.get_u16_ne();
-            let b = buffer.get_u16_ne();
+            let a = buffer.get_u16();
+            let b = buffer.get_u16();
 
             let byte_4 = buffer.get_u8();
             let mops_version = MopsVersion(byte_4 >> 5); // c

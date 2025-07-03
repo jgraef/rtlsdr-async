@@ -82,6 +82,7 @@ pub enum Frame {
     MilitaryExtendedSquitter(MilitaryExtendedSquitter),
     CommBAltitudeReply(CommBAltitudeReply),
     CommBIdentityReply(CommBIdentityReply),
+    MilitaryUse(MilitaryUse),
     CommD(CommD),
 }
 
@@ -162,6 +163,12 @@ impl Frame {
                 DownlinkFormat::CommBIdentityReply => {
                     Self::CommBIdentityReply(CommBIdentityReply::decode(buffer, bits_6_to_8))
                 }
+                DownlinkFormat::MilitaryUse => {
+                    Self::MilitaryUse(MilitaryUse {
+                        bits_6_to_8,
+                        data: buffer.get_bytes(),
+                    })
+                }
                 DownlinkFormat::CommD => {
                     // > Note Format number 24 is an exception. It is identified using only the first two bits, which must be 11 in binary. All following bits are used for encoding other information.
                     // https://mode-s.org/1090mhz/content/introduction.html
@@ -235,6 +242,7 @@ impl Frame {
             Frame::MilitaryExtendedSquitter(_) => DownlinkFormat::MilitaryExtendedSquitter,
             Frame::CommBAltitudeReply(_) => DownlinkFormat::CommBAltitudeReply,
             Frame::CommBIdentityReply(_) => DownlinkFormat::CommBIdentityReply,
+            Frame::MilitaryUse(_) => DownlinkFormat::MilitaryUse,
             Frame::CommD(_) => DownlinkFormat::CommD,
         }
     }
@@ -323,6 +331,10 @@ pub enum DownlinkFormat {
     MilitaryExtendedSquitter,
     CommBAltitudeReply,
     CommBIdentityReply,
+    /// Referenced [here][1], but can't find any more information on it.
+    ///
+    /// [1]: https://www.idc-online.com/technical_references/pdfs/electronic_engineering/Mode_S_Reply_Encoding.pdf
+    MilitaryUse,
     CommD,
 }
 
@@ -339,6 +351,7 @@ impl DownlinkFormat {
             19 => Ok(Self::MilitaryExtendedSquitter),
             20 => Ok(Self::CommBAltitudeReply),
             21 => Ok(Self::CommBIdentityReply),
+            22 => Ok(Self::MilitaryUse),
             24..=31 => Ok(Self::CommD),
             _ => Err(DecodeError::InvalidDf { value: byte }),
         }
@@ -356,7 +369,8 @@ impl DownlinkFormat {
             DownlinkFormat::MilitaryExtendedSquitter => LENGTH_LONG,
             DownlinkFormat::CommBAltitudeReply => LENGTH_LONG,
             DownlinkFormat::CommBIdentityReply => LENGTH_LONG,
-            DownlinkFormat::CommD => LENGTH_SHORT,
+            DownlinkFormat::MilitaryUse => LENGTH_LONG,
+            DownlinkFormat::CommD => LENGTH_LONG,
         }
     }
 }
@@ -1360,7 +1374,14 @@ impl CommBIdentityReply {
 pub struct CommD {
     // todo
     pub bits_3_to_8: u8,
-    pub data: [u8; 6],
+    pub data: [u8; 13],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MilitaryUse {
+    // todo
+    pub bits_6_to_8: u8,
+    pub data: [u8; 13],
 }
 
 #[cfg(test)]

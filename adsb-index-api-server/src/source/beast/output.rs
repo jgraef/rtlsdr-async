@@ -97,7 +97,7 @@ impl PacketType for OutputPacketType {
             _ => {
                 todo!("unknown packet type: {:02x}", byte);
                 //Self::Unknown(byte)
-            },
+            }
         }
     }
 
