@@ -47,7 +47,7 @@ pub enum Error {
     Tar1090AircraftFlags(#[from] crate::source::tar1090_db::AircraftFlagsFromStrError),
     #[error("tar1090-db has no commits")]
     Tar1090NoCommits,
-    Beast(#[from] crate::source::beast::Error),
+    Beast(#[from] adsbee_beast::Error),
     Sbs(#[from] crate::source::sbs::Error),
 }
 

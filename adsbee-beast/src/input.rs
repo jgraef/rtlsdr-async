@@ -1,8 +1,10 @@
+#![allow(dead_code)]
+
 //! BEAST input format encoder
 
 use pin_project_lite::pin_project;
 
-use crate::source::beast::PacketType;
+use crate::PacketType;
 
 pin_project! {
     #[derive(Debug)]

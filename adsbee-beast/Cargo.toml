@@ -1,0 +1,13 @@
+[package]
+name = "adsbee-beast"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes = "1.10.1"
+futures-util = "0.3.31"
+pin-project-lite = "0.2.16"
+thiserror = "2.0.12"
+tokio = { version = "1.46.0", default-features = false }
+tracing = "0.1.41"
+uuid = "1.17.0"

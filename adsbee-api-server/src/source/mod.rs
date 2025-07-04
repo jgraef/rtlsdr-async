@@ -1,4 +1,3 @@
-pub mod beast;
 pub mod history;
 pub mod rtlsdr;
 pub mod sbs;
@@ -43,7 +42,7 @@ impl SourceConfig {
                 connect_client(
                     address,
                     shutdown,
-                    beast::output::ReaderWithReceiverId::new,
+                    adsbee_beast::output::ReaderWithReceiverId::new,
                     async |(receiver_id, packet)| {
                         // note: adsb.lol beast out sends synthetic no-forward timestamps, so the
                         // best we can do is to take the time when we receive the packet.

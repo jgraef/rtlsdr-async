@@ -5,6 +5,10 @@ use adsbee_api_types::live::{
     ServerToClientMessage,
     SubscriptionFilter,
 };
+use adsbee_beast::{
+    self as beast,
+    MlatTimestamp,
+};
 use adsbee_mode_s as mode_s;
 use chrono::{
     DateTime,
@@ -17,10 +21,6 @@ use crate::{
     api::live::ClientId,
     source::{
         SourceId,
-        beast::{
-            self,
-            MlatTimestamp,
-        },
         sbs,
     },
     tracker::{

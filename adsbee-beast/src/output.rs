@@ -18,14 +18,12 @@ use tokio::io::{
 use uuid::Uuid;
 
 use crate::{
-    source::beast::{
-        ESCAPE,
-        Error,
-        MlatTimestamp,
-        PacketDecode,
-        PacketType,
-        SignalLevel,
-    },
+    ESCAPE,
+    Error,
+    MlatTimestamp,
+    PacketDecode,
+    PacketType,
+    SignalLevel,
     util::BufReadBytesExt,
 };
 

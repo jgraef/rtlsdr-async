@@ -30,13 +30,14 @@
 //! [3]: https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/net_io.c#L4885
 //! [4]: https://static.avionix-tech.com/statics/cms/2023-11-21/GNS5894T_ADSB_Module_datasheet_V1.1.pdf
 
+pub mod input;
+pub mod output;
+pub(crate) mod util;
+
 use bytes::{
     Buf,
     BufMut,
 };
-
-pub mod input;
-pub mod output;
 
 /// the "escape" byte.
 const ESCAPE: u8 = 0x1a;

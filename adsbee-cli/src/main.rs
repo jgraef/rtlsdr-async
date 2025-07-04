@@ -13,7 +13,6 @@ use adsbee_api_server::{
     api::Api,
     database::Database,
     source::{
-        beast,
         history::index_archive_day_from_directory,
         rtlsdr,
         sbs,
@@ -28,6 +27,7 @@ use adsbee_api_types::{
     flights::AircraftQuery,
     live::SubscriptionFilter,
 };
+use adsbee_beast as beast;
 use adsbee_mode_s as mode_s;
 use adsbee_types::{
     IcaoAddress,

@@ -12,6 +12,9 @@ workspace = true
 [dependencies.adsbee-api-types]
 workspace = true
 
+[dependencies.adsbee-beast]
+workspace = true
+
 [dependencies.adsbee-mode-s]
 workspace = true
 
