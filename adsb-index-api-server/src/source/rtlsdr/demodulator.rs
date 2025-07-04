@@ -31,17 +31,29 @@ enum DemodFail {
     Invalid,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Demodulator {
-    pub quality: Quality,
+    quality: Quality,
+    num_errors: usize,
+    max_errors: usize,
+}
+
+impl Default for Demodulator {
+    fn default() -> Self {
+        Self::new(Default::default(), 5)
+    }
 }
 
 impl Demodulator {
-    pub fn new(quality: Quality) -> Self {
-        Self { quality }
+    pub fn new(quality: Quality, max_errors: usize) -> Self {
+        Self {
+            quality,
+            num_errors: 0,
+            max_errors,
+        }
     }
 
-    pub fn next(&self, cursor: &mut Cursor) -> Option<RawFrame> {
+    pub fn next(&mut self, cursor: &mut Cursor) -> Option<RawFrame> {
         while find_preamble(cursor) {
             //tracing::debug!(?cursor.position, "found preamble");
 
@@ -61,25 +73,20 @@ impl Demodulator {
                 Err(DemodFail::Invalid) => {
                     // find next preamble starting from end of previous preamble
                     // so the main cursor stays unchanged and we do nothing here
-                    let n = frame_cursor.position - cursor.position;
-                    if n > 16 {
-                        tracing::debug!("error after {} samples / {} bytes", n, n / 16);
-                    }
                 }
             }
         }
 
-        tracing::debug!("exhausted samples");
-
         None
     }
 
-    fn read_frame(&self, cursor: &mut Cursor) -> Result<RawFrame, DemodFail> {
+    fn read_frame(&mut self, cursor: &mut Cursor) -> Result<RawFrame, DemodFail> {
+        self.num_errors = 0;
+
         let first_byte = self.read_byte(cursor)?;
 
         let df =
             mode_s::DownlinkFormat::from_u8(first_byte >> 3).map_err(|_| DemodFail::Invalid)?;
-        println!("df={df:?}");
         let n = df.frame_length();
 
         let frame = match n {
@@ -100,7 +107,7 @@ impl Demodulator {
     }
 
     fn read_frame_rest<const N: usize>(
-        &self,
+        &mut self,
         first_byte: u8,
         cursor: &mut Cursor,
     ) -> Result<[u8; N], DemodFail> {
@@ -112,7 +119,7 @@ impl Demodulator {
         Ok(data)
     }
 
-    fn read_bit(&self, cursor: &mut Cursor) -> Option<bool> {
+    fn read_bit(&self, cursor: &mut Cursor) -> Result<bool, bool> {
         // these should exist, since we read a preamble first
         let a = cursor.samples[cursor.position - 2];
         let b = cursor.samples[cursor.position - 1];
@@ -128,56 +135,56 @@ impl Demodulator {
         // todo: this could be implemented with a few bitmask really
 
         match self.quality {
-            Quality::NoChecks => Some(bit),
+            Quality::NoChecks => Ok(bit),
             Quality::HalfBit => {
                 if bit && bit_p && b > c {
-                    None
+                    Err(bit)
                 }
                 else if !bit && !bit_p && b < c {
-                    None
+                    Err(bit)
                 }
                 else {
-                    Some(bit)
+                    Ok(bit)
                 }
             }
             Quality::OneBit => {
                 if bit && bit_p && c > b {
-                    Some(true)
+                    Ok(true)
                 }
                 else if bit && !bit_p && d < b {
-                    Some(true)
+                    Ok(true)
                 }
                 else if !bit && bit_p && d > b {
-                    Some(false)
+                    Ok(false)
                 }
                 else if !bit && !bit_p && c < b {
-                    Some(false)
+                    Ok(false)
                 }
                 else {
-                    None
+                    Err(bit)
                 }
             }
             Quality::TwoBits => {
                 if bit && bit_p && c > b && d < a {
-                    Some(true)
+                    Ok(true)
                 }
                 else if bit && !bit_p && c > a && d < b {
-                    Some(true)
+                    Ok(true)
                 }
                 else if !bit && bit_p && c < a && d > b {
-                    Some(false)
+                    Ok(false)
                 }
                 else if !bit && !bit_p && c < b && d > a {
-                    Some(false)
+                    Ok(false)
                 }
                 else {
-                    None
+                    Err(bit)
                 }
             }
         }
     }
 
-    fn read_byte(&self, cursor: &mut Cursor) -> Result<u8, DemodFail> {
+    fn read_byte(&mut self, cursor: &mut Cursor) -> Result<u8, DemodFail> {
         let mut byte = 0;
 
         if cursor.remaining().len() < 2 * 8 {
@@ -186,12 +193,25 @@ impl Demodulator {
         else {
             for _ in 0..8 {
                 byte <<= 1;
-                if self.read_bit(cursor).ok_or(DemodFail::Invalid)? {
+                let bit = self.read_bit(cursor).or_else(|bit| {
+                    self.num_errors += 1;
+                    if self.num_errors <= self.max_errors {
+                        Ok(bit)
+                    }
+                    else {
+                        // rtl_adsb.c does change the previous bits, but I don't get how that works.
+                        // Wouldn't that break the next bit reads?
+                        //
+                        // <https://github.com/rtlsdrblog/rtl-sdr-blog/blob/240bd0e1e6d9f64361b6949047468958cd08aa31/src/rtl_adsb.c#L300>
+                        Err(DemodFail::Invalid)
+                    }
+                })?;
+
+                if bit {
                     byte |= 1;
                 }
             }
 
-            //tracing::debug!("read byte: 0x{byte:02x}");
             Ok(byte)
         }
     }
@@ -257,10 +277,10 @@ pin_project! {
 }
 
 impl<S> DemodulateStream<S> {
-    pub fn new(stream: S, quality: Quality, buffer_size: usize) -> Self {
+    pub fn new(stream: S, demodulator: Demodulator, buffer_size: usize) -> Self {
         Self {
             stream,
-            demodulator: Demodulator::new(quality),
+            demodulator,
             buffer: vec![0; buffer_size],
             read_pos: 0,
             write_pos: 0,
@@ -276,11 +296,11 @@ impl<S: AsyncReadSamples> Stream for DemodulateStream<S> {
         loop {
             let this = self.as_mut().project();
 
-            tracing::debug!(
+            /*tracing::debug!(
                 read_pos = *this.read_pos,
                 write_pos = *this.write_pos,
                 num_samples = *this.num_samples
-            );
+            );*/
 
             if *this.read_pos < *this.num_samples {
                 let mut cursor = Cursor {
@@ -391,7 +411,7 @@ mod tests {
 
         let samples = modulate(input, best_signal);
 
-        let demodulator = Demodulator::new(Quality::NoChecks);
+        let mut demodulator = Demodulator::new(Quality::NoChecks, 0);
         let mut cursor = Cursor {
             samples: &samples[..],
             position: 0,

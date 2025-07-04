@@ -17,7 +17,6 @@ use adsb_index_api_server::{
         history::index_archive_day_from_directory,
         mode_s::{
             self,
-            adsb,
         },
         rtlsdr,
         sbs,
@@ -153,15 +152,13 @@ async fn main() -> Result<(), Error> {
             //let mut rtl_adsb = rtl_tcp::RtlAdsbCommand::new().await?;
             let mut rtl_tcp = rtlsdr::tcp::RtlTcpClient::connect("localhost:1234").await?;
             println!("{:#?}", rtl_tcp.dongle_info());
-            rtl_tcp
-                .set_center_frequency(rtlsdr::DOWNLINK_FREQUENCY)
-                .await?;
+            rtl_tcp.set_frequency(rtlsdr::DOWNLINK_FREQUENCY).await?;
             rtl_tcp.set_sample_rate(rtlsdr::SAMPLE_RATE).await?;
             rtl_tcp.set_gain(rtlsdr::tcp::Gain::Auto).await?;
 
             let mut rtl_adsb = rtlsdr::demodulator::DemodulateStream::new(
                 rtl_tcp,
-                rtlsdr::demodulator::Quality::NoChecks,
+                rtlsdr::demodulator::Demodulator::default(),
                 0x800000,
             );
 
@@ -268,6 +265,7 @@ impl ClientTestArgs {
     }
 }
 
+#[allow(dead_code)]
 fn make_test(data: &[u8], frame: &mode_s::Frame) {
     let mut bytes_str = String::new();
     let mut bits_str = String::new();

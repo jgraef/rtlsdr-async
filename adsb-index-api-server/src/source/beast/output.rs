@@ -67,7 +67,7 @@ const PACKET_BUFFER_SIZE: usize = 64;
 /// 0xe3: <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/net_io.c#L4982>
 ///
 /// 0xe4:
-///  this seems to be a string encoded uuid. purpose unknown.
+///  this seems to be a string encoded uuid. this is how a feeder sends its uuid
 ///  <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/net_io.c#L433>
 ///  <https://github.com/wiedehopf/readsb/blob/75decb53c0e66f4c12cf24127578a3fe7d919219/net_io.c#L5045>
 ///
