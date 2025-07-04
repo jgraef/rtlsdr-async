@@ -1,5 +1,4 @@
 pub mod history;
-pub mod rtlsdr;
 pub mod tar1090_db;
 
 use chrono::Utc;

@@ -1,3 +1,9 @@
+#[cfg(feature = "command")]
+pub mod command;
+pub mod demodulator;
+pub mod tcp;
+pub(crate) mod util;
+
 use std::{
     pin::Pin,
     task::{
@@ -10,10 +16,6 @@ use bytemuck::{
     Pod,
     Zeroable,
 };
-
-pub mod command;
-pub mod demodulator;
-pub mod tcp;
 
 //const INPUT_BUFFER_SIZE: usize = 0x800000; // 8 KiB
 

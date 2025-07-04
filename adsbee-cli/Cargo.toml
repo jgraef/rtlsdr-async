@@ -18,6 +18,9 @@ workspace = true
 [dependencies.adsbee-mode-s]
 workspace = true
 
+[dependencies.adsbee-rtlsdr]
+workspace = true
+
 [dependencies.adsbee-sbs]
 workspace = true
 

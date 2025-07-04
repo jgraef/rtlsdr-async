@@ -9,11 +9,10 @@ use std::{
     },
 };
 
-use adsbee_mode_s as mode_s;
 use futures_util::Stream;
 use pin_project_lite::pin_project;
 
-use crate::source::rtlsdr::{
+use crate::{
     AsyncReadSamples,
     Cursor,
     IqSample,
@@ -83,25 +82,22 @@ impl Demodulator {
 
         let first_byte = self.read_byte(cursor)?;
 
-        let df =
-            mode_s::DownlinkFormat::from_u8(first_byte >> 3).map_err(|_| DemodFail::Invalid)?;
-        let n = df.frame_length();
-
-        let frame = match n {
-            mode_s::LENGTH_SHORT => {
-                RawFrame::ModeSShort {
+        match first_byte >> 3 {
+            0 | 4 | 5 | 11 => {
+                Ok(RawFrame::ModeSShort {
                     data: self.read_frame_rest(first_byte, cursor)?,
-                }
+                })
             }
-            mode_s::LENGTH_LONG => {
-                RawFrame::ModeSLong {
+            16..=22 | 24..=31 => {
+                Ok(RawFrame::ModeSLong {
                     data: self.read_frame_rest(first_byte, cursor)?,
-                }
+                })
             }
-            _ => panic!("Invalid frame length: {n}"),
-        };
-
-        Ok(frame)
+            _ => {
+                // 23 ??
+                Err(DemodFail::Invalid)
+            }
+        }
     }
 
     fn read_frame_rest<const N: usize>(
@@ -357,8 +353,9 @@ fn magnitude_of_samples_inplace(samples: &mut [IqSample]) {
 
 #[cfg(test)]
 mod tests {
-    use crate::source::rtlsdr::{
+    use crate::{
         Cursor,
+        RawFrame,
         demodulator::{
             Demodulator,
             Quality,
@@ -417,7 +414,7 @@ mod tests {
 
         let frame = demodulator.next(&mut cursor).expect("no frame demodulated");
         match frame {
-            crate::source::rtlsdr::RawFrame::ModeSLong { data } => {
+            RawFrame::ModeSLong { data } => {
                 assert_eq!(&data, input);
             }
             _ => panic!("unexpected frame: {:?}", frame),

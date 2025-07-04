@@ -27,10 +27,8 @@ use tokio::{
 };
 
 use crate::{
-    source::rtlsdr::{
-        AsyncReadSamples,
-        IqSample,
-    },
+    AsyncReadSamples,
+    IqSample,
     util::BufReadBytesExt,
 };
 
@@ -44,12 +42,12 @@ const COMMAND_TUNER_FREQUENCY: u8 = 0x01;
 const COMMAND_SAMPLE_RATE: u8 = 0x02;
 const COMMAND_TUNER_GAIN_MODE: u8 = 0x03;
 const COMMAND_TUNER_GAIN_LEVEL: u8 = 0x04;
-const COMMAND_TUNER_FREQUENCY_CORRECTION: u8 = 0x05;
-const COMMAND_IF_GAIN_LEVEL: u8 = 0x06;
-const COMMAND_TEST_MODE: u8 = 0x07;
+//const COMMAND_TUNER_FREQUENCY_CORRECTION: u8 = 0x05;
+//const COMMAND_IF_GAIN_LEVEL: u8 = 0x06;
+//const COMMAND_TEST_MODE: u8 = 0x07;
 const COMMAND_AUTOMATIC_GAIN_CORRECTION: u8 = 0x08;
-const COMMAND_DIRECT_SAMPLING: u8 = 0x09;
-const COMMAND_OFFSET_TUNING: u8 = 0x0a;
+//const COMMAND_DIRECT_SAMPLING: u8 = 0x09;
+//const COMMAND_OFFSET_TUNING: u8 = 0x0a;
 
 pin_project! {
     /// A client for `rtl_tcp`

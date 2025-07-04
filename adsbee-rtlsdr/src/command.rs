@@ -12,7 +12,7 @@ use tokio::{
     },
 };
 
-use crate::source::rtlsdr::RawFrame;
+use crate::RawFrame;
 
 #[derive(Debug, thiserror::Error)]
 #[error("rtl_adsb error")]
