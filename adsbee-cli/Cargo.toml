@@ -1,0 +1,25 @@
+[package]
+name = "adsbee-index-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies.adsbee-api-server]
+path = "../adsbee-api-server"
+
+[dependencies.adsbee-api-client]
+path = "../adsbee-api-client"
+
+[dependencies.adsbee-api-types]
+path = "../adsbee-api-types"
+
+[dependencies]
+chrono = "0.4.41"
+clap = { version = "4.5.40", features = ["derive", "env"] }
+color-eyre = "0.6.5"
+dotenvy = "0.15.7"
+futures-util = "0.3.31"
+hex = "0.4.3"
+tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+uuid = { version = "1.17.0", features = ["v4"] }
