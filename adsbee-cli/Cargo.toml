@@ -18,9 +18,11 @@ workspace = true
 [dependencies.adsbee-mode-s]
 workspace = true
 
-[dependencies.adsbee-types]
+[dependencies.adsbee-sbs]
 workspace = true
 
+[dependencies.adsbee-types]
+workspace = true
 
 [dependencies]
 chrono = "0.4.41"

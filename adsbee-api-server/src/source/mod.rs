@@ -1,6 +1,5 @@
 pub mod history;
 pub mod rtlsdr;
-pub mod sbs;
 pub mod tar1090_db;
 
 use chrono::Utc;
@@ -56,9 +55,12 @@ impl SourceConfig {
                 .await?;
             }
             SourceConfig::SbsMlat { address } => {
-                connect_client(address, shutdown, sbs::Reader::new, async |message| {
-                    tracker.push_sbs(source_id, true, message).await
-                })
+                connect_client(
+                    address,
+                    shutdown,
+                    adsbee_sbs::Reader::new,
+                    async |message| tracker.push_sbs(source_id, true, message).await,
+                )
                 .await?;
             }
         }

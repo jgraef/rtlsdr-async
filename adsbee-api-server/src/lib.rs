@@ -48,7 +48,7 @@ pub enum Error {
     #[error("tar1090-db has no commits")]
     Tar1090NoCommits,
     Beast(#[from] adsbee_beast::Error),
-    Sbs(#[from] crate::source::sbs::Error),
+    Sbs(#[from] adsbee_sbs::Error),
 }
 
 impl From<sqlx::Error> for Error {

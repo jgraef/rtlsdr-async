@@ -126,10 +126,6 @@ struct ReceiveBuffer {
 }
 
 impl ReceiveBuffer {
-    fn has_data(&self) -> bool {
-        self.no_newline_until < self.write_pos
-    }
-
     fn scan_for_newline(&mut self) -> Option<usize> {
         tracing::trace!(
             ?self.read_pos, ?self.write_pos, ?self.no_newline_until,
@@ -808,7 +804,7 @@ pub type Emergency = u16;
 mod tests {
     use futures_util::TryStreamExt;
 
-    use crate::source::sbs::{
+    use crate::{
         Message,
         Reader,
     };

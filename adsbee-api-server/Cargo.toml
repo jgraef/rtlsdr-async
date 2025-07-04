@@ -10,12 +10,16 @@ features = ["sqlx"]
 [dependencies.adsbee-beast]
 workspace = true
 
-[dependencies.adsbee-types]
-workspace = true
-features = ["sqlx"]
 
 [dependencies.adsbee-mode-s]
 workspace = true
+
+[dependencies.adsbee-sbs]
+workspace = true
+
+[dependencies.adsbee-types]
+workspace = true
+features = ["sqlx"]
 
 [dependencies]
 axum = { version = "0.8.4", features = ["http2", "json", "ws"] }

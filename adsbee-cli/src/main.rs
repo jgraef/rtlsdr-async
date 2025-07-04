@@ -15,7 +15,6 @@ use adsbee_api_server::{
     source::{
         history::index_archive_day_from_directory,
         rtlsdr,
-        sbs,
         tar1090_db::update_aircraft_db,
     },
     tracker::{
@@ -29,6 +28,7 @@ use adsbee_api_types::{
 };
 use adsbee_beast as beast;
 use adsbee_mode_s as mode_s;
+use adsbee_sbs as sbs;
 use adsbee_types::{
     IcaoAddress,
     Squawk,
