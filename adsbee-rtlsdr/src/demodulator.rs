@@ -82,21 +82,15 @@ impl Demodulator {
 
         let first_byte = self.read_byte(cursor)?;
 
-        match first_byte >> 3 {
-            0 | 4 | 5 | 11 => {
-                Ok(RawFrame::ModeSShort {
-                    data: self.read_frame_rest(first_byte, cursor)?,
-                })
-            }
-            16..=22 | 24..=31 => {
-                Ok(RawFrame::ModeSLong {
-                    data: self.read_frame_rest(first_byte, cursor)?,
-                })
-            }
-            _ => {
-                // 23 ??
-                Err(DemodFail::Invalid)
-            }
+        if first_byte & 0x80 == 0 {
+            Ok(RawFrame::ModeSShort {
+                data: self.read_frame_rest(first_byte, cursor)?,
+            })
+        }
+        else {
+            Ok(RawFrame::ModeSLong {
+                data: self.read_frame_rest(first_byte, cursor)?,
+            })
         }
     }
 
