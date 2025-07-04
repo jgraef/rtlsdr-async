@@ -15,9 +15,6 @@ use adsbee_api_server::{
     source::{
         beast,
         history::index_archive_day_from_directory,
-        mode_s::{
-            self,
-        },
         rtlsdr,
         sbs,
         tar1090_db::update_aircraft_db,
@@ -28,10 +25,13 @@ use adsbee_api_server::{
     },
 };
 use adsbee_api_types::{
-    IcaoAddress,
-    Squawk,
     flights::AircraftQuery,
     live::SubscriptionFilter,
+};
+use adsbee_mode_s as mode_s;
+use adsbee_types::{
+    IcaoAddress,
+    Squawk,
 };
 use chrono::Utc;
 use clap::{

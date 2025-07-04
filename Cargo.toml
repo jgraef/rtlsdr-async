@@ -1,3 +1,18 @@
 [workspace]
 resolver = "2"
-members = ["adsbee-api-client", "adsbee-api-server", "adsbee-api-types","adsbee-cli"]
+members = ["adsbee-api-client", "adsbee-api-server", "adsbee-api-types","adsbee-cli", "adsbee-mode-s", "adsbee-types"]
+
+[workspace.dependencies.adsbee-api-client]
+path = "adsbee-api-client"
+
+[workspace.dependencies.adsbee-api-server]
+path = "adsbee-api-server"
+
+[workspace.dependencies.adsbee-api-types]
+path = "adsbee-api-types"
+
+[workspace.dependencies.adsbee-mode-s]
+path = "adsbee-mode-s"
+
+[workspace.dependencies.adsbee-types]
+path = "adsbee-types"

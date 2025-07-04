@@ -4,7 +4,7 @@ pub mod gillham;
 
 use bytes::Buf;
 
-use crate::source::mode_s::{
+use crate::{
     AltitudeCode,
     DownlinkRequest,
     FlightStatus,
@@ -157,5 +157,17 @@ impl<'a, B: Buf> Buf for CrcBuf<'a, B> {
         let chunk = &self.inner.chunk()[..cnt];
         self.digest.update(chunk);
         self.inner.advance(cnt);
+    }
+}
+
+pub(crate) trait BufReadBytesExt {
+    fn get_bytes<const N: usize>(&mut self) -> [u8; N];
+}
+
+impl<B: Buf> BufReadBytesExt for B {
+    fn get_bytes<const N: usize>(&mut self) -> [u8; N] {
+        let mut data: [u8; N] = [0; N];
+        self.copy_to_slice(&mut data[..]);
+        data
     }
 }

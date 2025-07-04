@@ -3,7 +3,19 @@ use std::collections::{
     hash_map,
 };
 
-use adsbee_api_types::{
+use adsbee_mode_s::{
+    self as mode_s,
+    VerticalStatus,
+    adsb::{
+        self,
+        Callsign,
+        cpr::{
+            self,
+            Decoder,
+        },
+    },
+};
+use adsbee_types::{
     IcaoAddress,
     Squawk,
 };
@@ -13,21 +25,7 @@ use chrono::{
     Utc,
 };
 
-use crate::{
-    source::mode_s::{
-        self,
-        VerticalStatus,
-        adsb::{
-            self,
-            Callsign,
-            cpr::{
-                self,
-                Decoder,
-            },
-        },
-    },
-    util::sparse_list::SparseList,
-};
+use crate::util::sparse_list::SparseList;
 
 #[derive(Debug, Default)]
 pub struct State {

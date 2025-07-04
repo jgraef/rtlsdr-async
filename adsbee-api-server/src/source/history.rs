@@ -9,7 +9,7 @@ use std::{
     path::Path,
 };
 
-use adsbee_api_types::{
+use adsbee_types::{
     IcaoAddress,
     Squawk,
 };

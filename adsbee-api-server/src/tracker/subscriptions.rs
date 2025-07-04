@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use adsbee_api_types::{
+use adsbee_api_types::live::{
+    ServerToClientMessage,
+    SubscriptionEvent,
+    SubscriptionFilter,
+};
+use adsbee_types::{
     IcaoAddress,
     Squawk,
-    live::{
-        ServerToClientMessage,
-        SubscriptionEvent,
-        SubscriptionFilter,
-    },
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;

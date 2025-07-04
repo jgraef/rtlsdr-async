@@ -3,6 +3,10 @@ name = "adsbee-api-types"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies.adsbee-types]
+workspace = true
+features = ["serde"]
+
 [dependencies]
 chrono = { version = "0.4.41", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }

@@ -9,18 +9,16 @@ use std::{
     },
 };
 
+use adsbee_mode_s as mode_s;
 use futures_util::Stream;
 use pin_project_lite::pin_project;
 
-use crate::source::{
-    mode_s,
-    rtlsdr::{
-        AsyncReadSamples,
-        Cursor,
-        IqSample,
-        Magnitude,
-        RawFrame,
-    },
+use crate::source::rtlsdr::{
+    AsyncReadSamples,
+    Cursor,
+    IqSample,
+    Magnitude,
+    RawFrame,
 };
 
 /// Preamble: 8 µs / 16 samples

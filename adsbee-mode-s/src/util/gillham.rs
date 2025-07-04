@@ -190,7 +190,7 @@ pub fn decode_gillham_ac12(code: u16) -> u16 {
 }
 #[cfg(test)]
 mod tests {
-    use crate::source::mode_s::util::gillham::decode_gillham_id13;
+    use crate::util::gillham::decode_gillham_id13;
 
     #[test]
     fn it_decodes_id13() {

@@ -21,24 +21,22 @@ pub mod util;
 
 use std::fmt::Debug;
 
-use adsbee_api_types::{
+pub use adsbee_types::{
     IcaoAddress,
     Squawk,
 };
 use bytes::Buf;
 
-use crate::{
-    source::mode_s::util::{
-        CRC_24_MODES,
-        CrcBuf,
-        decode_air_air_surveillance_common_fields,
-        decode_surveillance_reply_body,
-        gillham::{
-            decode_gillham_ac13,
-            decode_gillham_id13,
-        },
+use crate::util::{
+    BufReadBytesExt,
+    CRC_24_MODES,
+    CrcBuf,
+    decode_air_air_surveillance_common_fields,
+    decode_surveillance_reply_body,
+    gillham::{
+        decode_gillham_ac13,
+        decode_gillham_id13,
     },
-    util::BufReadBytesExt,
 };
 
 /// Length of a short mode-s frame
@@ -1386,9 +1384,9 @@ pub struct MilitaryUse {
 
 #[cfg(test)]
 mod tests {
-    use adsbee_api_types::IcaoAddress;
+    use adsbee_types::IcaoAddress;
 
-    use crate::source::mode_s::{
+    use crate::{
         AltitudeCode,
         AltitudeUnit,
         Capability,

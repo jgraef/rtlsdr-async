@@ -1,7 +1,7 @@
 use bytes::Buf;
 
 use crate::{
-    source::mode_s::DecodeError,
+    DecodeError,
     util::BufReadBytesExt,
 };
 

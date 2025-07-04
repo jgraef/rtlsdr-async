@@ -41,8 +41,8 @@ pub enum Error {
     Database(#[from] crate::database::Error),
     Http(#[from] reqwest::Error),
     Csv(#[from] csv::Error),
-    IcaoAddress(#[from] adsbee_api_types::IcaoAddressFromStrError),
-    Squawk(#[from] adsbee_api_types::SquawkFromStrError),
+    IcaoAddress(#[from] adsbee_types::IcaoAddressFromStrError),
+    Squawk(#[from] adsbee_types::SquawkFromStrError),
     Wtc(#[from] adsbee_api_types::WtcFromStrError),
     Tar1090AircraftFlags(#[from] crate::source::tar1090_db::AircraftFlagsFromStrError),
     #[error("tar1090-db has no commits")]

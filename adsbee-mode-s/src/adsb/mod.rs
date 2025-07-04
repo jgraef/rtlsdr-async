@@ -11,23 +11,21 @@ use std::{
     str::FromStr,
 };
 
-use adsbee_api_types::Squawk;
+use adsbee_types::Squawk;
 use bytes::Buf;
 
 use crate::{
-    source::mode_s::{
-        DecodeError,
-        adsb::cpr::Cpr,
-        util::{
-            decode_frame_aligned_altitude_or_identity_code,
-            decode_frame_aligned_cpr,
-            gillham::{
-                decode_gillham_ac12,
-                decode_gillham_id13,
-            },
+    DecodeError,
+    adsb::cpr::Cpr,
+    util::{
+        BufReadBytesExt,
+        decode_frame_aligned_altitude_or_identity_code,
+        decode_frame_aligned_cpr,
+        gillham::{
+            decode_gillham_ac12,
+            decode_gillham_id13,
         },
     },
-    util::BufReadBytesExt,
 };
 
 /// Reference page 39
@@ -2025,10 +2023,10 @@ impl TurnIndicator {
 
 #[cfg(test)]
 mod tests {
-    use adsbee_api_types::Squawk;
+    use adsbee_types::Squawk;
     use approx::assert_abs_diff_eq;
 
-    use crate::source::mode_s::{
+    use crate::{
         ExtendedSquitter,
         Frame,
         adsb::{

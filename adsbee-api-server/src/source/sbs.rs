@@ -18,7 +18,7 @@ use std::{
     },
 };
 
-use adsbee_api_types::{
+use adsbee_types::{
     IcaoAddress,
     Squawk,
     SquawkFromStrError,

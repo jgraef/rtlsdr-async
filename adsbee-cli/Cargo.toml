@@ -4,13 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies.adsbee-api-server]
-path = "../adsbee-api-server"
+workspace = true
 
 [dependencies.adsbee-api-client]
-path = "../adsbee-api-client"
+workspace = true
 
 [dependencies.adsbee-api-types]
-path = "../adsbee-api-types"
+workspace = true
+
+[dependencies.adsbee-mode-s]
+workspace = true
+
+[dependencies.adsbee-types]
+workspace = true
+
 
 [dependencies]
 chrono = "0.4.41"

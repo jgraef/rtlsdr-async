@@ -1,3 +1,7 @@
+use adsbee_types::{
+    IcaoAddress,
+    Squawk,
+};
 use chrono::{
     DateTime,
     Utc,
@@ -7,11 +11,7 @@ use serde::{
     Serialize,
 };
 
-use crate::{
-    Bbox,
-    IcaoAddress,
-    Squawk,
-};
+use crate::Bbox;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GetSearchQuery {

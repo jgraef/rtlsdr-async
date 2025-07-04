@@ -23,7 +23,7 @@ use std::{
     ops::Not,
 };
 
-use crate::source::mode_s::VerticalStatus;
+use crate::VerticalStatus;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cpr {
@@ -117,8 +117,6 @@ pub enum DecodeError {
 }
 
 const N_Z: f64 = 15.0;
-const D_LAT_EVEN: f64 = 360.0 / (4.0 * N_Z);
-const D_LAT_ODD: f64 = 360.0 / (4.0 * N_Z - 1.0);
 
 // floor(x) = x.floor()
 // mod(x, y) = x.rem_euclid(y)

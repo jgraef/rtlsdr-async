@@ -4,14 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies.adsbee-api-types]
-path = "../adsbee-api-types"
+workspace = true
 features = ["sqlx"]
 
-[dev-dependencies]
-approx = "0.5.1"
+[dependencies.adsbee-types]
+workspace = true
+features = ["sqlx"]
+
+[dependencies.adsbee-mode-s]
+workspace = true
 
 [dependencies]
-adsb_deku = { version = "0.8.0", features = ["serde"], git = "https://github.com/rsadsb/adsb_deku.git", branch = "update-deku-0-19-1" }
 axum = { version = "0.8.4", features = ["http2", "json", "ws"] }
 bitflags = "2.9.1"
 bytemuck = { version = "1.23.1", features = ["derive"] }

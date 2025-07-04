@@ -10,10 +10,8 @@ use std::{
     time::Instant,
 };
 
-use adsbee_api_types::{
-    IcaoAddress,
-    Wtc,
-};
+use adsbee_api_types::Wtc;
+use adsbee_types::IcaoAddress;
 use bitflags::bitflags;
 use bytes::Buf;
 use humantime::format_duration;

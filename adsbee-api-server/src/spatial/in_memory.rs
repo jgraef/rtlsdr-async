@@ -3,7 +3,7 @@ use std::{
     num::NonZeroUsize,
 };
 
-use adsbee_api_types::IcaoAddress;
+use adsbee_types::IcaoAddress;
 
 #[derive(Clone, Debug)]
 pub(super) struct Node {

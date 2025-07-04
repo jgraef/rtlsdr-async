@@ -1,12 +1,12 @@
-use adsbee_api_types::{
+use adsbee_api_types::flights::{
+    GetSearchQuery,
+    PostSearchQuery,
+    SearchResult,
+    SearchResults,
+};
+use adsbee_types::{
     IcaoAddress,
     Squawk,
-    flights::{
-        GetSearchQuery,
-        PostSearchQuery,
-        SearchResult,
-        SearchResults,
-    },
 };
 use axum::{
     Json,
@@ -27,8 +27,8 @@ use crate::api::{
 };
 
 pub async fn get_search_flights(
-    State(api): State<Api>,
-    Query(query): Query<GetSearchQuery>,
+    State(_api): State<Api>,
+    Query(_query): Query<GetSearchQuery>,
 ) -> Result<Json<SearchResults>, ApiError> {
     //Ok(Json(search_impl(api, query.try_into()?).await?))
     todo!();
