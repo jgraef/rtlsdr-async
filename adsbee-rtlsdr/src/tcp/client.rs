@@ -31,11 +31,12 @@ use crate::{
     Configure,
     Gain,
     IqSample,
+    tcp::DongleInfo,
     util::BufReadBytesExt,
 };
 
 #[derive(Debug, thiserror::Error)]
-#[error("rtl_tcp error")]
+#[error("rtl_tcp client error")]
 pub enum Error {
     Io(#[from] std::io::Error),
 }
@@ -199,11 +200,4 @@ impl AsyncReadSamples for RtlTcpClient {
             }
         }
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct DongleInfo {
-    pub magic: [u8; 4],
-    pub tuner_type: u32,
-    pub tuner_gain_type: u32,
 }

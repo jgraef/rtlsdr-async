@@ -34,13 +34,19 @@ use adsbee_mode_s as mode_s;
 use adsbee_rtlsdr::{
     AsyncReadSamples,
     Configure,
+    Gain,
     RawFrame,
     RtlSdr,
     demodulator::{
         DemodulateStream,
         Demodulator,
+        Quality,
     },
-    tcp::RtlTcpClient,
+    tcp::{
+        DongleInfo,
+        client::RtlTcpClient,
+        server::RtlSdrServer,
+    },
 };
 use adsbee_sbs as sbs;
 use adsbee_types::{
@@ -70,7 +76,10 @@ use tokio::{
         AsyncRead,
         BufReader,
     },
-    net::TcpStream,
+    net::{
+        TcpListener,
+        TcpStream,
+    },
 };
 use uuid::Uuid;
 
@@ -171,7 +180,7 @@ async fn main() -> Result<(), Error> {
         } => {
             let mut dump_file = dump
                 .as_deref()
-                .map(|path| std::fs::File::create(path))
+                .map(|path| std::fs::OpenOptions::new().append(true).open(path))
                 .transpose()?
                 .map(BufWriter::new);
 
@@ -210,7 +219,11 @@ async fn main() -> Result<(), Error> {
             where
                 Error: From<<S as AsyncReadSamples>::Error> + From<<S as Configure>::Error>,
             {
-                let mut rtl_adsb = DemodulateStream::new(rtl_sdr, Demodulator::default(), 0x800000);
+                let mut rtl_adsb = DemodulateStream::new(
+                    rtl_sdr,
+                    Demodulator::new(Quality::NoChecks, 5),
+                    0x800000,
+                );
                 rtl_adsb.configure(frequency).await?;
 
                 let mut frame_processor = FrameProcessor::default();
@@ -234,6 +247,25 @@ async fn main() -> Result<(), Error> {
                 frame_processor.finish();
                 Ok(())
             }
+        }
+        Command::RtlSdrServer { device, address } => {
+            let mut rtl_sdr = RtlSdr::open(device.unwrap_or_default().try_into().unwrap()).await?;
+            rtl_sdr.set_center_frequency(1090000000).await?;
+            rtl_sdr.set_sample_rate(2_000_000).await?;
+            rtl_sdr.set_gain(Gain::Auto).await?;
+            rtl_sdr.set_agc_mode(true).await?;
+            let tcp_listener = TcpListener::bind(address).await?;
+            RtlSdrServer::new(
+                rtl_sdr,
+                tcp_listener,
+                DongleInfo {
+                    magic: *b"RTL0",
+                    tuner_type: 6,
+                    tuner_gain_type: 29,
+                },
+            )
+            .serve()
+            .await?;
         }
     }
 
@@ -300,6 +332,15 @@ enum Command {
         /// in Hz. Default: 1090Mhz
         #[clap(short, long)]
         frequency: Option<u32>,
+    },
+    RtlSdrServer {
+        /// Device index
+        ///
+        /// Defaults to using the first.
+        #[clap(short, long)]
+        device: Option<usize>,
+
+        address: String,
     },
 }
 
@@ -384,13 +425,13 @@ impl Default for FrameProcessor {
 
 impl FrameProcessor {
     fn handle_mode_s_data(&mut self, data: &[u8]) -> bool {
+        //println!("{}", hex::encode(&data));
         match mode_s::Frame::decode_and_calculate_checksum(&mut &data[..]) {
             Ok(frame) => {
                 match frame.check() {
                     Some(true) => {
                         //make_test(data, &frame);
                         println!("{:#?}", frame.frame);
-                        println!();
                         self.state.update_with_mode_s(Utc::now(), &frame.frame);
                         self.num_bytes += data.len();
                         self.num_frames += 1;

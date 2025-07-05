@@ -60,6 +60,16 @@ pub enum RawFrame {
     ModeSLong { data: [u8; 14] },
 }
 
+impl AsRef<[u8]> for RawFrame {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            RawFrame::ModeAc { data } => &data[..],
+            RawFrame::ModeSShort { data } => &data[..],
+            RawFrame::ModeSLong { data } => &data[..],
+        }
+    }
+}
+
 pub type Magnitude = u16;
 
 #[derive(Clone, Copy, Debug)]
@@ -96,10 +106,42 @@ pub trait AsyncReadSamples {
 }
 
 pub trait AsyncReadSamplesExt: AsyncReadSamples {
+    fn read_samples<'a>(&'a mut self, buffer: &'a mut [IqSample]) -> ReadSamples<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadSamples {
+            stream: self,
+            buffer,
+        }
+    }
+
     fn map_err<E, F>(self, f: F) -> MapErr<Self, F>
     where
         F: FnMut(Self::Error) -> E,
-        Self: Sized;
+        Self: Sized,
+    {
+        MapErr {
+            inner: self,
+            map_err: f,
+        }
+    }
+}
+
+impl<T: AsyncReadSamples> AsyncReadSamplesExt for T {}
+
+pub struct ReadSamples<'a, S: ?Sized> {
+    stream: &'a mut S,
+    buffer: &'a mut [IqSample],
+}
+
+impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamples<'a, S> {
+    type Output = Result<usize, S::Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+        Pin::new(&mut *this.stream).poll_read_samples(cx, this.buffer)
+    }
 }
 
 pin_project! {
