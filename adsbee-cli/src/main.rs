@@ -3,6 +3,10 @@ use std::{
         Debug,
         Write as _,
     },
+    io::{
+        BufWriter,
+        Write,
+    },
     path::PathBuf,
     pin::Pin,
     time::Instant,
@@ -33,6 +37,10 @@ use adsbee_types::{
     IcaoAddress,
     Squawk,
 };
+use byteorder::{
+    BigEndian,
+    WriteBytesExt,
+};
 use chrono::Utc;
 use clap::{
     Parser,
@@ -48,7 +56,6 @@ use futures_util::{
     pin_mut,
 };
 use tokio::{
-    fs::File,
     io::{
         AsyncRead,
         BufReader,
@@ -133,10 +140,10 @@ async fn main() -> Result<(), Error> {
                         println!("modeac: {data:?}");
                     }
                     beast::output::OutputPacket::ModeSLong { data, .. } => {
-                        frame_processor.handle_mode_s_data(&data)
+                        frame_processor.handle_mode_s_data(&data);
                     }
                     beast::output::OutputPacket::ModeSShort { data, .. } => {
-                        frame_processor.handle_mode_s_data(&data)
+                        frame_processor.handle_mode_s_data(&data);
                     }
                     _ => todo!("{packet:?}"),
                 }
@@ -146,15 +153,29 @@ async fn main() -> Result<(), Error> {
 
             frame_processor.finish();
         }
-        Command::RtlSdr => {
-            let mut frame_processor = FrameProcessor::default();
+        Command::RtlSdr { dump, address, frequency } => {
+            let mut dump_file = dump
+                .as_deref()
+                .map(|path| std::fs::File::create(path))
+                .transpose()?
+                .map(BufWriter::new);
+            let mut dump_file = |tag, data: &[u8]| {
+                if let Some(dump_file) = &mut dump_file {
+                    let timestamp = Utc::now();
+                    dump_file.write_u8(tag)?;
+                    dump_file.write_i64::<BigEndian>(timestamp.timestamp_nanos_opt().unwrap())?;
+                    dump_file.write_all(data)?;
+                    dump_file.flush()?;
+                }
+                Ok::<(), Error>(())
+            };
 
-            //let mut rtl_adsb = rtl_tcp::RtlAdsbCommand::new().await?;
-            let mut rtl_tcp = rtlsdr::tcp::RtlTcpClient::connect("localhost:1234").await?;
+            let mut rtl_tcp = rtlsdr::tcp::RtlTcpClient::connect(&address).await?;
             println!("{:#?}", rtl_tcp.dongle_info());
-            rtl_tcp.set_frequency(rtlsdr::DOWNLINK_FREQUENCY).await?;
+            rtl_tcp.set_frequency(frequency).await?;
             rtl_tcp.set_sample_rate(rtlsdr::SAMPLE_RATE).await?;
             rtl_tcp.set_gain(rtlsdr::tcp::Gain::Auto).await?;
+            rtl_tcp.set_auto_gain_correction(true).await?;
 
             let mut rtl_adsb = rtlsdr::demodulator::DemodulateStream::new(
                 rtl_tcp,
@@ -162,14 +183,20 @@ async fn main() -> Result<(), Error> {
                 0x800000,
             );
 
+            let mut frame_processor = FrameProcessor::default();
+
             while let Some(data) = rtl_adsb.try_next().await? {
                 match data {
                     rtlsdr::RawFrame::ModeAc { data } => todo!("mode ac: {data:?}"),
                     rtlsdr::RawFrame::ModeSShort { data } => {
-                        frame_processor.handle_mode_s_data(&data)
+                        if frame_processor.handle_mode_s_data(&data) {
+                            dump_file(7, &data)?;
+                        }
                     }
                     rtlsdr::RawFrame::ModeSLong { data } => {
-                        frame_processor.handle_mode_s_data(&data)
+                        if frame_processor.handle_mode_s_data(&data) {
+                            dump_file(14, &data)?;
+                        }
                     }
                 }
             }
@@ -221,7 +248,16 @@ enum Command {
     },
     SbsClient(ClientTestArgs),
     BeastClient(ClientTestArgs),
-    RtlSdr,
+    RtlSdr {
+        #[clap(short, long)]
+        dump: Option<PathBuf>,
+
+        #[clap(short, long, default_value = "localhost:1234")]
+        address: String,
+
+        #[clap(short, long, default_value = "1090000000")]
+        frequency: u32,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -244,7 +280,7 @@ impl ClientTestArgs {
     {
         let input: Pin<Box<dyn AsyncRead>> = match (&self.address, &self.file) {
             (Some(address), None) => Box::pin(TcpStream::connect(&address).await?),
-            (None, Some(file)) => Box::pin(File::open(&file).await?),
+            (None, Some(file)) => Box::pin(tokio::fs::File::open(&file).await?),
             (Some(_), Some(_)) => bail!("Only one of --address or --file can be used."),
             (None, None) => return Ok(()),
         };
@@ -304,21 +340,21 @@ impl Default for FrameProcessor {
 }
 
 impl FrameProcessor {
-    fn handle_mode_s_data(&mut self, data: &[u8]) {
-        match mode_s::Frame::decode_and_check_checksum(&mut &data[..]) {
+    fn handle_mode_s_data(&mut self, data: &[u8]) -> bool {
+        match mode_s::Frame::decode_and_calculate_checksum(&mut &data[..]) {
             Ok(frame) => {
-                match &frame {
-                    mode_s::Frame::ExtendedSquitter(_) => {
+                match frame.check() {
+                    Some(true) => {
                         //make_test(data, &frame);
-                        println!("{frame:#?}");
+                        println!("{:#?}", frame.frame);
                         println!();
+                        self.state.update_with_mode_s(Utc::now(), &frame.frame);
+                        self.num_bytes += data.len();
+                        self.num_frames += 1;
+                        return true;
                     }
-                    _ => {}
+                    _ => {},
                 }
-
-                self.state.update_with_mode_s(Utc::now(), &frame);
-                self.num_bytes += data.len();
-                self.num_frames += 1;
             }
             Err(error) => {
                 match &error {
@@ -331,6 +367,8 @@ impl FrameProcessor {
                 //tracing::error!(?error, ?data);
             }
         }
+
+        false
     }
 
     fn finish(self) {

@@ -228,18 +228,19 @@ fn is_preamble(samples: &[u16]) -> bool {
 }
 
 fn find_preamble(cursor: &mut Cursor) -> bool {
-    let remaining = cursor.remaining();
-
-    if let Some(max) = remaining.len().checked_sub(PREAMBLE_SAMPLES) {
-        for i in 0..max {
-            if is_preamble(&remaining[i..]) {
-                cursor.advance(i + PREAMBLE_SAMPLES);
-                return true;
+    loop {
+        let remaining = cursor.remaining();
+        if remaining.len() >= PREAMBLE_SAMPLES {
+            if is_preamble(remaining) {
+                cursor.advance(PREAMBLE_SAMPLES);
+                break true;
             }
+            cursor.advance(1);
+        }
+        else {
+            break false;
         }
     }
-
-    false
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
