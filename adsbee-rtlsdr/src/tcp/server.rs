@@ -49,7 +49,7 @@ impl<S> RtlSdrServer<S> {
 
 impl<S> RtlSdrServer<S>
 where
-    S: AsyncReadSamples + Configure + Send + Unpin + 'static,
+    S: Clone + AsyncReadSamples + Configure + Send + Unpin + 'static,
 {
     pub async fn serve(mut self) -> Result<(), Error> {
         //let (command_sender, command_receiver) = mpsc::channel(16);
@@ -68,10 +68,8 @@ where
                 result = self.tcp_listener.accept() => {
                     let (connection, address) = result?;
                     tracing::debug!(%address, "new connection");
-                    //tokio::spawn(handle_client(connection, address, self.shutdown.clone(), command_sender.clone()));
-                    if let Err(error) = handle_client(&self.dongle_info, &mut self.stream, connection, self.shutdown.clone()).await {
-                        tracing::error!(?error);
-                    }
+                    //tokio::spawn(handle_client(connection, self.shutdown.clone(), self.stream.clone(), self.dongle_info ));
+                    todo!();
                 }
             }
         }
@@ -81,10 +79,10 @@ where
 }
 
 async fn handle_client<S>(
-    dongle_info: &DongleInfo,
-    stream: &mut S,
     mut connection: TcpStream,
     shutdown: CancellationToken,
+    mut stream: S,
+    dongle_info: DongleInfo,
 ) -> Result<(), Error>
 where
     S: AsyncReadSamples + Configure + Send + Unpin + 'static,

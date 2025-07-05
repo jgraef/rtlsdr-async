@@ -15,8 +15,9 @@ use std::{
 
 pub use bindings::{
     DeviceInfo,
+    DeviceIter,
     RtlSdr,
-    list_devices,
+    devices,
 };
 use bytemuck::{
     Pod,
@@ -34,6 +35,12 @@ pub struct IqSample {
     pub i: u8,
     /// Q: quadrature / imaginary component
     pub q: u8,
+}
+
+impl Default for IqSample {
+    fn default() -> Self {
+        Self { i: 128, q: 128 }
+    }
 }
 
 impl IqSample {
