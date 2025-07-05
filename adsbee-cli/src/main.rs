@@ -31,7 +31,17 @@ use adsbee_api_types::{
 };
 use adsbee_beast as beast;
 use adsbee_mode_s as mode_s;
-use adsbee_rtlsdr as rtlsdr;
+use adsbee_rtlsdr::{
+    AsyncReadSamples,
+    Configure,
+    RawFrame,
+    RtlSdr,
+    demodulator::{
+        DemodulateStream,
+        Demodulator,
+    },
+    tcp::RtlTcpClient,
+};
 use adsbee_sbs as sbs;
 use adsbee_types::{
     IcaoAddress,
@@ -153,13 +163,19 @@ async fn main() -> Result<(), Error> {
 
             frame_processor.finish();
         }
-        Command::RtlSdr { dump, address, frequency } => {
+        Command::RtlSdr {
+            dump,
+            address,
+            device,
+            frequency,
+        } => {
             let mut dump_file = dump
                 .as_deref()
                 .map(|path| std::fs::File::create(path))
                 .transpose()?
                 .map(BufWriter::new);
-            let mut dump_file = |tag, data: &[u8]| {
+
+            let dump_file = |tag, data: &[u8]| {
                 if let Some(dump_file) = &mut dump_file {
                     let timestamp = Utc::now();
                     dump_file.write_u8(tag)?;
@@ -170,38 +186,54 @@ async fn main() -> Result<(), Error> {
                 Ok::<(), Error>(())
             };
 
-            let mut rtl_tcp = rtlsdr::tcp::RtlTcpClient::connect(&address).await?;
-            println!("{:#?}", rtl_tcp.dongle_info());
-            rtl_tcp.set_frequency(frequency).await?;
-            rtl_tcp.set_sample_rate(rtlsdr::SAMPLE_RATE).await?;
-            rtl_tcp.set_gain(rtlsdr::tcp::Gain::Auto).await?;
-            rtl_tcp.set_auto_gain_correction(true).await?;
+            if let Some(address) = &address {
+                if device.is_some() {
+                    bail!("Both --address and --device set. Either one must be used.");
+                }
 
-            let mut rtl_adsb = rtlsdr::demodulator::DemodulateStream::new(
-                rtl_tcp,
-                rtlsdr::demodulator::Demodulator::default(),
-                0x800000,
-            );
+                let rtl_tcp = RtlTcpClient::connect(&address).await?;
+                println!("{:#?}", rtl_tcp.dongle_info());
 
-            let mut frame_processor = FrameProcessor::default();
+                run_rtl_sdr(rtl_tcp, frequency, dump_file).await?;
+            }
+            else {
+                let rtl_sdr = RtlSdr::open(device.unwrap_or_default().try_into().unwrap()).await?;
 
-            while let Some(data) = rtl_adsb.try_next().await? {
-                match data {
-                    rtlsdr::RawFrame::ModeAc { data } => todo!("mode ac: {data:?}"),
-                    rtlsdr::RawFrame::ModeSShort { data } => {
-                        if frame_processor.handle_mode_s_data(&data) {
-                            dump_file(7, &data)?;
+                run_rtl_sdr(rtl_sdr, frequency, dump_file).await?;
+            }
+
+            async fn run_rtl_sdr<S: AsyncReadSamples + Configure + Unpin>(
+                rtl_sdr: S,
+                frequency: Option<u32>,
+                mut dump_file: impl FnMut(u8, &[u8]) -> Result<(), Error>,
+            ) -> Result<(), Error>
+            where
+                Error: From<<S as AsyncReadSamples>::Error> + From<<S as Configure>::Error>,
+            {
+                let mut rtl_adsb = DemodulateStream::new(rtl_sdr, Demodulator::default(), 0x800000);
+                rtl_adsb.configure(frequency).await?;
+
+                let mut frame_processor = FrameProcessor::default();
+
+                while let Some(data) = rtl_adsb.try_next().await? {
+                    match data {
+                        RawFrame::ModeAc { data } => todo!("mode ac: {data:?}"),
+                        RawFrame::ModeSShort { data } => {
+                            if frame_processor.handle_mode_s_data(&data) {
+                                dump_file(7, &data)?;
+                            }
                         }
-                    }
-                    rtlsdr::RawFrame::ModeSLong { data } => {
-                        if frame_processor.handle_mode_s_data(&data) {
-                            dump_file(14, &data)?;
+                        RawFrame::ModeSLong { data } => {
+                            if frame_processor.handle_mode_s_data(&data) {
+                                dump_file(14, &data)?;
+                            }
                         }
                     }
                 }
-            }
 
-            frame_processor.finish();
+                frame_processor.finish();
+                Ok(())
+            }
         }
     }
 
@@ -249,14 +281,25 @@ enum Command {
     SbsClient(ClientTestArgs),
     BeastClient(ClientTestArgs),
     RtlSdr {
-        #[clap(short, long)]
+        /// Dump all verified frames to file.
+        #[clap(short = 'D', long)]
         dump: Option<PathBuf>,
 
-        #[clap(short, long, default_value = "localhost:1234")]
-        address: String,
+        /// Connect to rtl_tcp instead of using the RTL-SDR directly.
+        #[clap(short, long)]
+        address: Option<String>,
 
-        #[clap(short, long, default_value = "1090000000")]
-        frequency: u32,
+        /// Device index
+        ///
+        /// Defaults to using the first.
+        #[clap(short, long)]
+        device: Option<usize>,
+
+        /// Select non-default frequency
+        ///
+        /// in Hz. Default: 1090Mhz
+        #[clap(short, long)]
+        frequency: Option<u32>,
     },
 }
 
@@ -353,7 +396,7 @@ impl FrameProcessor {
                         self.num_frames += 1;
                         return true;
                     }
-                    _ => {},
+                    _ => {}
                 }
             }
             Err(error) => {

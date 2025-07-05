@@ -14,7 +14,9 @@ use pin_project_lite::pin_project;
 
 use crate::{
     AsyncReadSamples,
+    Configure,
     Cursor,
+    Gain,
     IqSample,
     Magnitude,
     RawFrame,
@@ -22,6 +24,15 @@ use crate::{
 
 /// Preamble: 8 µs / 16 samples
 const PREAMBLE_SAMPLES: usize = 16;
+
+/// Sample rate: 2 samples/µs
+pub const SAMPLE_RATE: u32 = 2_000_000;
+
+/// Mode S downlink frequency: 1090 MHz
+pub const DOWNLINK_FREQUENCY: u32 = 1_090_000_000;
+
+/// Mode S uplink frequency: 1030 MHz
+pub const UPLINK_FREQUENCY: u32 = 1_030_000_000;
 
 enum DemodFail {
     NotEnoughSamples,
@@ -275,6 +286,18 @@ impl<S> DemodulateStream<S> {
             write_pos: 0,
             num_samples: 0,
         }
+    }
+}
+
+impl<S: Configure> DemodulateStream<S> {
+    pub async fn configure(&mut self, frequency: Option<u32>) -> Result<(), S::Error> {
+        self.stream
+            .set_center_frequency(frequency.unwrap_or(DOWNLINK_FREQUENCY))
+            .await?;
+        self.stream.set_sample_rate(SAMPLE_RATE).await?;
+        self.stream.set_gain(Gain::Auto).await?;
+        self.stream.set_agc_mode(true).await?;
+        Ok(())
     }
 }
 

@@ -28,6 +28,8 @@ use tokio::{
 
 use crate::{
     AsyncReadSamples,
+    Configure,
+    Gain,
     IqSample,
     util::BufReadBytesExt,
 };
@@ -107,23 +109,24 @@ impl RtlTcpClient {
         self.stream.flush().await?;
         Ok(())
     }
+}
 
-    /// Set tuner frequency in Hz
-    pub async fn set_frequency(&mut self, frequency: u32) -> Result<(), Error> {
+impl Configure for RtlTcpClient {
+    type Error = Error;
+
+    async fn set_center_frequency(&mut self, frequency: u32) -> Result<(), Error> {
         self.send_command(COMMAND_TUNER_FREQUENCY, |buffer| {
             buffer.put_u32(frequency);
         })
         .await
     }
 
-    /// Set sample rate in Hz
-    pub async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
+    async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
         self.send_command(COMMAND_SAMPLE_RATE, |buffer| buffer.put_u32(sample_rate))
             .await
     }
 
-    /// Set tuner gain, in tenths of a dB
-    pub async fn set_gain(&mut self, gain: Gain) -> Result<(), Error> {
+    async fn set_gain(&mut self, gain: Gain) -> Result<(), Error> {
         match gain {
             Gain::Manual(gain) => {
                 //self.send_command(COMMAND_TUNER_GAIN_MODE, |buffer| buffer.put_u32(1))
@@ -139,10 +142,7 @@ impl RtlTcpClient {
         Ok(())
     }
 
-    /// Set the automatic gain correction, a software step to correct the
-    /// incoming signal, this is not automatic gain control on the hardware
-    /// chip, that is controlled by tuner gain mode.
-    pub async fn set_auto_gain_correction(&mut self, enable: bool) -> Result<(), Error> {
+    async fn set_agc_mode(&mut self, enable: bool) -> Result<(), Error> {
         self.send_command(COMMAND_AUTOMATIC_GAIN_CORRECTION, |buffer| {
             buffer.put_u32(if enable { 1 } else { 0 })
         })
@@ -158,6 +158,10 @@ impl AsyncReadSamples for RtlTcpClient {
         cx: &mut Context<'_>,
         buffer: &mut [IqSample],
     ) -> Poll<Result<usize, Error>> {
+        if buffer.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
         let this = self.project();
 
         let buffer_bytes: &mut [u8] = bytemuck::cast_slice_mut(buffer);
@@ -202,12 +206,4 @@ pub struct DongleInfo {
     pub magic: [u8; 4],
     pub tuner_type: u32,
     pub tuner_gain_type: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Gain {
-    /// Gain tenths of a dB
-    Manual(u32),
-    /// Auto gain control
-    Auto,
 }

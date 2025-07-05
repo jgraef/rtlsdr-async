@@ -1,3 +1,4 @@
+mod bindings;
 #[cfg(feature = "command")]
 pub mod command;
 pub mod demodulator;
@@ -12,21 +13,16 @@ use std::{
     },
 };
 
+pub use bindings::{
+    DeviceInfo,
+    RtlSdr,
+    list_devices,
+};
 use bytemuck::{
     Pod,
     Zeroable,
 };
-
-//const INPUT_BUFFER_SIZE: usize = 0x800000; // 8 KiB
-
-/// Sample rate: 2 samples/µs
-pub const SAMPLE_RATE: u32 = 2_000_000;
-
-/// Mode S downlink frequency: 1090 MHz
-pub const DOWNLINK_FREQUENCY: u32 = 1_090_000_000;
-
-/// Mode S uplink frequency: 1030 MHz
-pub const UPLINK_FREQUENCY: u32 = 1_030_000_000;
+use pin_project_lite::pin_project;
 
 /// 16 bit IQ sample
 ///
@@ -64,16 +60,6 @@ pub enum RawFrame {
     ModeSLong { data: [u8; 14] },
 }
 
-pub trait AsyncReadSamples {
-    type Error;
-
-    fn poll_read_samples(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut [IqSample],
-    ) -> Poll<Result<usize, Self::Error>>;
-}
-
 pub type Magnitude = u16;
 
 #[derive(Clone, Copy, Debug)]
@@ -97,4 +83,80 @@ impl<'a> Cursor<'a> {
     pub fn remaining(&self) -> &[Magnitude] {
         &self.samples[self.position..]
     }
+}
+
+pub trait AsyncReadSamples {
+    type Error;
+
+    fn poll_read_samples(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [IqSample],
+    ) -> Poll<Result<usize, Self::Error>>;
+}
+
+pub trait AsyncReadSamplesExt: AsyncReadSamples {
+    fn map_err<E, F>(self, f: F) -> MapErr<Self, F>
+    where
+        F: FnMut(Self::Error) -> E,
+        Self: Sized;
+}
+
+pin_project! {
+    #[derive(Clone, Copy, Debug)]
+    pub struct MapErr<S, F> {
+        #[pin]
+        inner: S,
+        map_err: F,
+    }
+}
+
+impl<S, E, F> AsyncReadSamples for MapErr<S, F>
+where
+    S: AsyncReadSamples,
+    F: FnMut(S::Error) -> E,
+{
+    type Error = E;
+    fn poll_read_samples(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [IqSample],
+    ) -> Poll<Result<usize, Self::Error>> {
+        let this = self.project();
+        this.inner
+            .poll_read_samples(cx, buffer)
+            .map_err(this.map_err)
+    }
+}
+
+pub trait Configure {
+    type Error;
+
+    /// Set tuner frequency in Hz
+    fn set_center_frequency(
+        &mut self,
+        frequency: u32,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Set sample rate in Hz
+    fn set_sample_rate(
+        &mut self,
+        sample_rate: u32,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Set tuner gain, in tenths of a dB
+    fn set_gain(&mut self, gain: Gain) -> impl Future<Output = Result<(), Self::Error>>;
+
+    /// Set the automatic gain correction, a software step to correct the
+    /// incoming signal, this is not automatic gain control on the hardware
+    /// chip, that is controlled by tuner gain mode.
+    fn set_agc_mode(&mut self, enabled: bool) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gain {
+    /// Gain tenths of a dB
+    Manual(u32),
+    /// Auto gain control
+    Auto,
 }
