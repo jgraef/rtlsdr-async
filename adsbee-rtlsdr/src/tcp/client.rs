@@ -174,7 +174,7 @@ impl Configure for RtlTcpClient {
         self.send_command(Command::SetTunerXtal { frequency }).await
     }
 
-    async fn set_bias_t(&mut self, enable: bool) -> Result<(), Error> {
+    async fn set_bias_tee(&mut self, enable: bool) -> Result<(), Error> {
         self.send_command(Command::SetBiasT { enable }).await
     }
 }

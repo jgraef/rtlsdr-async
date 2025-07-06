@@ -19,7 +19,6 @@ use crate::{
     Gain,
     IqSample,
     Magnitude,
-    RawFrame,
 };
 
 /// Preamble: 8 µs / 16 samples
@@ -33,6 +32,23 @@ pub const DOWNLINK_FREQUENCY: u32 = 1_090_000_000;
 
 /// Mode S uplink frequency: 1030 MHz
 pub const UPLINK_FREQUENCY: u32 = 1_030_000_000;
+
+#[derive(Clone, Copy, Debug)]
+pub enum Frame {
+    ModeAc { data: [u8; 2] },
+    ModeSShort { data: [u8; 7] },
+    ModeSLong { data: [u8; 14] },
+}
+
+impl AsRef<[u8]> for Frame {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Frame::ModeAc { data } => &data[..],
+            Frame::ModeSShort { data } => &data[..],
+            Frame::ModeSLong { data } => &data[..],
+        }
+    }
+}
 
 enum DemodFail {
     NotEnoughSamples,
@@ -61,7 +77,7 @@ impl Demodulator {
         }
     }
 
-    pub fn next(&mut self, cursor: &mut Cursor) -> Option<RawFrame> {
+    pub fn next(&mut self, cursor: &mut Cursor) -> Option<Frame> {
         while find_preamble(cursor) {
             //tracing::debug!(?cursor.position, "found preamble");
 
@@ -88,18 +104,18 @@ impl Demodulator {
         None
     }
 
-    fn read_frame(&mut self, cursor: &mut Cursor) -> Result<RawFrame, DemodFail> {
+    fn read_frame(&mut self, cursor: &mut Cursor) -> Result<Frame, DemodFail> {
         self.num_errors = 0;
 
         let first_byte = self.read_byte(cursor)?;
 
         if first_byte & 0x80 == 0 {
-            Ok(RawFrame::ModeSShort {
+            Ok(Frame::ModeSShort {
                 data: self.read_frame_rest(first_byte, cursor)?,
             })
         }
         else {
-            Ok(RawFrame::ModeSLong {
+            Ok(Frame::ModeSLong {
                 data: self.read_frame_rest(first_byte, cursor)?,
             })
         }
@@ -302,7 +318,7 @@ impl<S: Configure> DemodulateStream<S> {
 }
 
 impl<S: AsyncReadSamples> Stream for DemodulateStream<S> {
-    type Item = Result<RawFrame, S::Error>;
+    type Item = Result<Frame, S::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
@@ -373,9 +389,9 @@ fn magnitude_of_samples_inplace(samples: &mut [IqSample]) {
 mod tests {
     use crate::{
         Cursor,
-        RawFrame,
         demodulator::{
             Demodulator,
+            Frame,
             Quality,
         },
     };
@@ -432,7 +448,7 @@ mod tests {
 
         let frame = demodulator.next(&mut cursor).expect("no frame demodulated");
         match frame {
-            RawFrame::ModeSLong { data } => {
+            Frame::ModeSLong { data } => {
                 assert_eq!(&data, input);
             }
             _ => panic!("unexpected frame: {:?}", frame),

@@ -11,6 +11,7 @@ use tokio::{
     },
 };
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::{
     AsyncReadSamples,
@@ -84,8 +85,19 @@ where
                 _ = self.shutdown.cancelled() => break,
                 result = self.tcp_listener.accept() => {
                     let (connection, address) = result?;
-                    tracing::debug!(%address, "new connection");
-                    tokio::spawn(handle_client(connection, self.shutdown.clone(), self.stream.clone(), self.dongle_info ));
+                    let shutdown = self.shutdown.clone();
+                    let stream = self.stream.clone();
+                    let dongle_info = self.dongle_info;
+                    let span = tracing::info_span!("connection", %address);
+                    tokio::spawn(
+                        async move {
+                            tracing::debug!(%address, "new connection");
+                            if let Err(error) = handle_client(connection, shutdown, stream, dongle_info ).await {
+                                tracing::error!(?error);
+                            }
+                            tracing::debug!(%address, "closing connection");
+                        }.instrument(span)
+                    );
                 }
             }
         }
@@ -139,7 +151,16 @@ where
                     break;
                 }
                 if !read_buffer_cursor.has_remaining_mut() {
-                    handle_client_command(&read_buffer, &mut stream).await?;
+                    match Command::decode(&read_buffer[..]) {
+                        Ok(command) => {
+                            if let Err(error) = handle_client_command(command, &mut stream).await {
+                                tracing::warn!(?command, ?error, "error while handling command");
+                            }
+                        }
+                        Err(command) => {
+                            tracing::warn!(?command, "invalid command");
+                        }
+                    }
                     read_buffer_cursor = &mut read_buffer[..];
                 }
             }
@@ -158,107 +179,96 @@ where
         }
     }
 
-    tracing::debug!("closing connection");
     Ok(())
 }
 
-async fn handle_client_command<S>(
-    command: &[u8; COMMAND_LENGTH],
-    stream: &mut S,
-) -> Result<(), Error>
+async fn handle_client_command<S>(command: Command, stream: &mut S) -> Result<(), Error>
 where
     S: Configure + Unpin,
     <S as Configure>::Error: std::error::Error + Send + Sync + 'static,
 {
-    match Command::decode(&command[..]) {
-        Ok(command) => {
-            match command {
-                Command::SetCenterFrequency { frequency } => {
-                    stream
-                        .set_center_frequency(frequency)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?
-                }
-                Command::SetSampleRate { sample_rate } => {
-                    stream
-                        .set_sample_rate(sample_rate)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetTunerGainMode { mode } => {
-                    if mode == TunerGainMode::Auto {
-                        stream
-                            .set_tuner_gain(Gain::Auto)
-                            .await
-                            .map_err(|error| Error::Device(Box::new(error)))?;
-                    }
-                    else {
-                        // don't do anything here. SetTunerGainLevel will set
-                        // the mode to manual automatically
-                    }
-                }
-                Command::SetTunerGainLevel { gain } => {
-                    stream
-                        .set_tuner_gain(Gain::Manual(gain))
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetFrequencyCorrection { ppm } => {
-                    stream
-                        .set_frequency_correction(ppm)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetTunerIfGain { stage, gain } => {
-                    stream
-                        .set_tuner_if_gain(stage, gain)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetTestMode { enable: _ } => {
-                    // not supported
-                }
-                Command::SetAgcMode { enable } => {
-                    stream
-                        .set_agc_mode(enable)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetDirectSampling { mode: _ } => {
-                    // not supported
-                }
-                Command::SetOffsetTuning { enable } => {
-                    stream
-                        .set_offset_tuning(enable)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetRtlXtal { frequency } => {
-                    stream
-                        .set_rtl_xtal(frequency)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetTunerXtal { frequency } => {
-                    stream
-                        .set_tuner_xtal(frequency)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
-                Command::SetTunerGainLevelIndex { index: _ } => {
-                    // todo: we can obviously support it, but it's kind of
-                    // awkward with the interface we have. open to suggestions
-                }
-                Command::SetBiasT { enable } => {
-                    stream
-                        .set_bias_t(enable)
-                        .await
-                        .map_err(|error| Error::Device(Box::new(error)))?;
-                }
+    match command {
+        Command::SetCenterFrequency { frequency } => {
+            stream
+                .set_center_frequency(frequency)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?
+        }
+        Command::SetSampleRate { sample_rate } => {
+            stream
+                .set_sample_rate(sample_rate)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetTunerGainMode { mode } => {
+            if mode == TunerGainMode::Auto {
+                stream
+                    .set_tuner_gain(Gain::Auto)
+                    .await
+                    .map_err(|error| Error::Device(Box::new(error)))?;
+            }
+            else {
+                // don't do anything here. SetTunerGainLevel will set
+                // the mode to manual automatically
             }
         }
-        Err(command) => {
-            tracing::debug!(?command, "invalid command");
+        Command::SetTunerGainLevel { gain } => {
+            stream
+                .set_tuner_gain(Gain::Manual(gain))
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetFrequencyCorrection { ppm } => {
+            stream
+                .set_frequency_correction(ppm)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetTunerIfGain { stage, gain } => {
+            stream
+                .set_tuner_if_gain(stage, gain)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetTestMode { enable: _ } => {
+            // not supported
+        }
+        Command::SetAgcMode { enable } => {
+            stream
+                .set_agc_mode(enable)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetDirectSampling { mode: _ } => {
+            // not supported
+        }
+        Command::SetOffsetTuning { enable } => {
+            stream
+                .set_offset_tuning(enable)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetRtlXtal { frequency } => {
+            stream
+                .set_rtl_xtal(frequency)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetTunerXtal { frequency } => {
+            stream
+                .set_tuner_xtal(frequency)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
+        }
+        Command::SetTunerGainLevelIndex { index: _ } => {
+            // todo: we can obviously support it, but it's kind of
+            // awkward with the interface we have. open to suggestions
+        }
+        Command::SetBiasT { enable } => {
+            stream
+                .set_bias_tee(enable)
+                .await
+                .map_err(|error| Error::Device(Box::new(error)))?;
         }
     }
 

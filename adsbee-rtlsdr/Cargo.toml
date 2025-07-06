@@ -13,13 +13,12 @@ parking_lot = "0.12.4"
 pin-project-lite = "0.2.16"
 rtlsdr_sys = "1.1.0"
 thiserror = "2.0.12"
-tokio = { version = "1.46.0", default-features = false, optional = true }
+tokio = { version = "1.46.0", default-features = false, features = ["sync"] }
 tokio-util = { version = "0.7.15", optional = true }
-#tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing = "0.1.41"
 
 [features]
 default = ["tcp"]
-full = ["tcp", "command"]
-command = ["dep:hex", "dep:tokio", "tokio/process"]
-tcp = ["dep:tokio", "dep:tokio-util", "tokio/net", "tokio/io-util", "tokio/macros", "tokio/rt"]
+full = ["tcp", "command", "tokio/sync"]
+command = ["dep:hex", "tokio/process"]
+tcp = ["dep:tokio-util", "tokio/net", "tokio/io-util", "tokio/macros", "tokio/rt"]

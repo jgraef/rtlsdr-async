@@ -34,9 +34,9 @@ use adsbee_mode_s as mode_s;
 use adsbee_rtlsdr::{
     AsyncReadSamples,
     Configure,
-    RawFrame,
     RtlSdr,
     demodulator::{
+        self,
         DemodulateStream,
         Demodulator,
         Quality,
@@ -227,13 +227,13 @@ async fn main() -> Result<(), Error> {
 
                 while let Some(data) = rtl_adsb.try_next().await? {
                     match data {
-                        RawFrame::ModeAc { data } => todo!("mode ac: {data:?}"),
-                        RawFrame::ModeSShort { data } => {
+                        demodulator::Frame::ModeAc { data } => todo!("mode ac: {data:?}"),
+                        demodulator::Frame::ModeSShort { data } => {
                             if frame_processor.handle_mode_s_data(&data) {
                                 dump_file(7, &data)?;
                             }
                         }
-                        RawFrame::ModeSLong { data } => {
+                        demodulator::Frame::ModeSLong { data } => {
                             if frame_processor.handle_mode_s_data(&data) {
                                 dump_file(14, &data)?;
                             }

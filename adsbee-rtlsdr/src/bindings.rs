@@ -10,7 +10,10 @@ use std::{
     },
     pin::Pin,
     ptr::null_mut,
-    sync::Arc,
+    sync::{
+        Arc,
+        OnceLock,
+    },
     task::{
         Context,
         Poll,
@@ -24,6 +27,10 @@ use parking_lot::Mutex;
 use rtlsdr_sys::{
     rtlsdr_get_center_freq,
     rtlsdr_read_sync,
+};
+use tokio::sync::{
+    mpsc,
+    oneshot,
 };
 
 use crate::{
@@ -41,8 +48,10 @@ const DEFAULT_QUEUE_SIZE: usize = 64; // total of 1 MiB buffers
 pub enum Error {
     #[error("librtlsdr error: {function} retured {value}")]
     LibRtlSdr { function: &'static str, value: i32 },
-    #[error("device handler thread died unexpectedly")]
-    DeviceThreadDead,
+    #[error("control handler thread died unexpectedly")]
+    ControlThreadDead,
+    #[error("reader handler thread died unexpectedly")]
+    ReaderThreadDead,
     #[error("can't select gain level, because librtlsdr doesn't report any supported gain levels")]
     NoSupportedGains,
     #[error("unknown tuner")]
@@ -232,15 +241,26 @@ impl Handle {
         // furthermore the arrays returned by librtlsdr are fixed and as of writing
         // don't exceed 29 entries.
         let ret = unsafe { rtlsdr_sys::rtlsdr_get_tuner_gains(handle, null_mut()) };
+        tracing::debug!(ret, "rtlsdr_get_tuner_gains");
         let mut tuner_gains = TunerGains::default();
-        if ret <= 64 && ret > 0 {
-            let ret2 = unsafe {
-                rtlsdr_sys::rtlsdr_get_tuner_gains(handle, tuner_gains.values.as_mut_ptr())
-            };
-            assert_eq!(
-                ret, ret2,
-                "rtlsdr_get_tuner_gains returned 2 different lengths"
-            );
+        if let Ok(num_gains) = ret.try_into() {
+            if num_gains < TunerGains::CAPACITY {
+                tuner_gains.length = num_gains;
+                let ret2 = unsafe {
+                    rtlsdr_sys::rtlsdr_get_tuner_gains(handle, tuner_gains.values.as_mut_ptr())
+                };
+                assert_eq!(
+                    ret, ret2,
+                    "rtlsdr_get_tuner_gains returned 2 different lengths"
+                );
+            }
+            else {
+                tracing::warn!(
+                    ?num_gains,
+                    capacity = TunerGains::CAPACITY,
+                    "number of tuner gains available exceeds capacity"
+                );
+            }
         }
         tracing::debug!(gains = ?tuner_gains, "rtlsdr_get_tuner_gains");
 
@@ -388,7 +408,8 @@ impl Handle {
         let _guard = self.control_lock.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_freq_correction(self.handle, ppm) };
         tracing::debug!(ret, ?ppm, "rtlsdr_set_freq_correction");
-        if ret == 0 {
+        // -2 means that this value is already set, so not really an error
+        if ret == 0 || ret == -2 {
             Ok(())
         }
         else {
@@ -406,6 +427,28 @@ impl Handle {
     }
 
     fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
+        // from the rtlsdr_set_offset_tuning code:
+        //
+        // ```c
+        // if ((dev->tuner_type == RTLSDR_TUNER_R820T) ||
+        //   (dev->tuner_type == RTLSDR_TUNER_R828D)) {
+        //   /* RTL-SDR-BLOG Hack, enables us to turn on the bias tee by
+        //    * clicking on "offset tuning" in software that doesn't have
+        //    * specified bias tee support. Offset tuning is not used for
+        //    *R820T devices so it is no problem.
+        //    */
+        //    rtlsdr_set_bias_tee(dev, on);
+        //    return -2;
+        // }
+        // ```
+        //
+        // we will return Error::Unsupported if anyone tries to **enable** Bias-T on an
+        // R8xx. If we decided that we want to allow this hack, we need to also accept
+        // -2 as a ok return value.
+        if self.tuner_type.is_r82xx() {
+            return Err(Error::Unsupported);
+        }
+
         let _guard = self.control_lock.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_offset_tuning(self.handle, enable as i32) };
         tracing::debug!(ret, ?enable, "rtlsdr_set_offset_tuning");
@@ -458,7 +501,7 @@ impl Handle {
         }
     }
 
-    fn set_bias_t(&self, _pin: u8, _enable: bool) -> Result<(), Error> {
+    fn set_bias_tee(&self, pin: u8, enable: bool) -> Result<(), Error> {
         // todo: missing from ffi bindings
 
         /*let _guard = self.control_lock.lock();
@@ -470,7 +513,11 @@ impl Handle {
         else {
             Err(Error::from_lib("rtlsdr_set_bias_tee_gpio", ret))
         }*/
-        Err(Error::Unsupported)
+
+        tracing::warn!(?pin, ?enable, "todo: rtlsdr_set_bias_tee_gpio");
+
+        // we will just return Ok(()) and pretend we set it
+        Ok(())
     }
 
     // not synchronized! this must only be used in the reader_thread
@@ -553,6 +600,9 @@ pub struct RtlSdr {
     /// methods except reads are synchronized.
     handle: Arc<Handle>,
 
+    /// sender to send commands to control thread for slow control commands
+    control_queue_sender: mpsc::Sender<ControlMessage>,
+
     /// reader for the buffer broadcast queue.
     buffer_queue_reader: buffer_queue::Reader,
 
@@ -575,6 +625,8 @@ impl RtlSdr {
         // this is needed for reads to work
         handle.reset_buffer();
 
+        let control_queue_sender = get_control_queue_sender();
+
         let (buffer_queue_writer, buffer_queue_reader) =
             buffer_queue::channel(queue_size, buffer_size);
 
@@ -587,26 +639,49 @@ impl RtlSdr {
 
         Ok(Self {
             handle,
+            control_queue_sender,
             buffer_queue_reader,
             buffer: None,
             buffer_pos: 0,
         })
     }
 
-    pub fn get_center_frquency(&self) -> Result<u32, Error> {
+    pub fn get_center_frequency(&self) -> Result<u32, Error> {
         self.handle.get_center_frequency()
     }
 
-    pub fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
-        self.handle.set_center_frequency(frequency)
+    pub async fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetCenterFrequency {
+                handle: self.handle.clone(),
+                frequency,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub fn get_sample_rate(&self) -> Result<u32, Error> {
         self.handle.get_sample_rate()
     }
 
-    pub fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
-        self.handle.set_sample_rate(sample_rate)
+    pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetSampleRate {
+                handle: self.handle.clone(),
+                sample_rate,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub fn get_tuner_type(&self) -> TunerType {
@@ -621,59 +696,103 @@ impl RtlSdr {
         self.handle.get_tuner_gain()
     }
 
-    pub fn set_tuner_gain(&self, gain: Gain) -> Result<(), Error> {
-        match gain {
-            Gain::Manual(gain) => {
-                // manual gain mode must be enabled
-                self.handle.set_tuner_gain_mode(true)?;
-
-                // we need to find a supported gain value
-                if let Some(gain) = self
-                    .handle
-                    .tuner_gains
-                    .iter()
-                    .min_by_key(|supported| (**supported - gain).abs())
-                {
-                    self.handle.set_tuner_gain(*gain)?;
-                    Ok(())
-                }
-                else {
-                    Err(Error::NoSupportedGains)
-                }
-            }
-            Gain::Auto => {
-                self.handle.set_tuner_gain_mode(false)?;
-                Ok(())
-            }
-        }
+    pub async fn set_tuner_gain(&self, gain: Gain) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetTunerGain {
+                handle: self.handle.clone(),
+                gain,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
-    pub fn set_tuner_if_gain(&self, stage: i32, gain: i32) -> Result<(), Error> {
-        self.handle.set_tuner_if_gain(stage, gain)
+    pub async fn set_tuner_if_gain(&self, stage: i32, gain: i32) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetTunerIfGain {
+                handle: self.handle.clone(),
+                stage,
+                gain,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
-    pub fn set_tuner_bandwidth(&self, bandwidth: u32) -> Result<(), Error> {
-        self.handle.set_tuner_bandwidth(bandwidth)
+    pub async fn set_tuner_bandwidth(&self, bandwidth: u32) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetTunerBandwidth {
+                handle: self.handle.clone(),
+                bandwidth,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
-    pub fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
-        self.handle.set_agc_mode(enable)
+    pub async fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetAgcMode {
+                handle: self.handle.clone(),
+                enable,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub fn get_frequency_correction(&self) -> Result<i32, Error> {
         self.handle.get_frequency_correction()
     }
 
-    pub fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
-        self.handle.set_frequency_correction(ppm)
+    pub async fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetFrequencyCorrection {
+                handle: self.handle.clone(),
+                ppm,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub fn get_offset_tuning(&self) -> Result<bool, Error> {
         self.handle.get_offset_tuning()
     }
 
-    pub fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
-        self.handle.set_offset_tuning(enable)
+    pub async fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetOffsetTuning {
+                handle: self.handle.clone(),
+                enable,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub fn get_rtl_xtal(&self) -> Result<u32, Error> {
@@ -681,9 +800,28 @@ impl RtlSdr {
         Ok(rtl_frequency)
     }
 
-    pub fn set_rtl_xtal(&self, frequency: u32) -> Result<(), Error> {
-        let (_rtl_frequency, tuner_frequency) = self.handle.get_xtal_frequency()?;
-        self.handle.set_xtal_frequency(frequency, tuner_frequency)
+    async fn set_xtal_frequency(
+        &self,
+        rtl_xtal_frequency: Option<u32>,
+        tuner_xtal_frequency: Option<u32>,
+    ) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetXtalFrequency {
+                handle: self.handle.clone(),
+                rtl_xtal_frequency,
+                tuner_xtal_frequency,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
+    }
+
+    pub async fn set_rtl_xtal(&self, frequency: u32) -> Result<(), Error> {
+        self.set_xtal_frequency(Some(frequency), None).await
     }
 
     pub fn get_tuner_xtal(&self) -> Result<u32, Error> {
@@ -691,13 +829,24 @@ impl RtlSdr {
         Ok(tuner_frequency)
     }
 
-    pub fn set_tuner_xtal(&self, frequency: u32) -> Result<(), Error> {
-        let (rtl_frequency, _tuner_frequency) = self.handle.get_xtal_frequency()?;
-        self.handle.set_xtal_frequency(rtl_frequency, frequency)
+    pub async fn set_tuner_xtal(&self, frequency: u32) -> Result<(), Error> {
+        self.set_xtal_frequency(None, Some(frequency)).await
     }
 
-    pub fn set_bias_t(&self, enable: bool) -> Result<(), Error> {
-        self.handle.set_bias_t(0, enable)
+    pub async fn set_bias_tee(&self, enable: bool) -> Result<(), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::SetBiasTee {
+                handle: self.handle.clone(),
+                pin: 0,
+                enable,
+                result_sender,
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 }
 
@@ -756,44 +905,254 @@ impl Configure for RtlSdr {
     type Error = Error;
 
     async fn set_center_frequency(&mut self, frequency: u32) -> Result<(), Error> {
-        RtlSdr::set_center_frequency(&*self, frequency)
+        RtlSdr::set_center_frequency(&*self, frequency).await
     }
 
     async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
-        RtlSdr::set_sample_rate(&*self, sample_rate)
+        RtlSdr::set_sample_rate(&*self, sample_rate).await
     }
 
     async fn set_tuner_gain(&mut self, gain: Gain) -> Result<(), Error> {
-        RtlSdr::set_tuner_gain(&*self, gain)
+        RtlSdr::set_tuner_gain(&*self, gain).await
     }
 
     async fn set_agc_mode(&mut self, enable: bool) -> Result<(), Error> {
-        RtlSdr::set_agc_mode(&*self, enable)
+        RtlSdr::set_agc_mode(&*self, enable).await
     }
 
     async fn set_frequency_correction(&mut self, ppm: i32) -> Result<(), Error> {
-        RtlSdr::set_frequency_correction(&*self, ppm)
+        RtlSdr::set_frequency_correction(&*self, ppm).await
     }
 
     async fn set_tuner_if_gain(&mut self, stage: i16, gain: i16) -> Result<(), Error> {
-        RtlSdr::set_tuner_if_gain(&*self, stage.into(), gain.into())
+        RtlSdr::set_tuner_if_gain(&*self, stage.into(), gain.into()).await
     }
 
     async fn set_offset_tuning(&mut self, enable: bool) -> Result<(), Error> {
-        RtlSdr::set_offset_tuning(&*self, enable)
+        RtlSdr::set_offset_tuning(&*self, enable).await
     }
 
     async fn set_rtl_xtal(&mut self, frequency: u32) -> Result<(), Error> {
-        RtlSdr::set_rtl_xtal(&*self, frequency)
+        RtlSdr::set_rtl_xtal(&*self, frequency).await
     }
 
     async fn set_tuner_xtal(&mut self, frequency: u32) -> Result<(), Error> {
-        RtlSdr::set_tuner_xtal(&*self, frequency)
+        RtlSdr::set_tuner_xtal(&*self, frequency).await
     }
 
-    async fn set_bias_t(&mut self, enable: bool) -> Result<(), Error> {
-        RtlSdr::set_bias_t(&*self, enable)
+    async fn set_bias_tee(&mut self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_bias_tee(&*self, enable).await
     }
+}
+
+/// a call to rtlsdr_set_center_freq takes about 50ms. that's too long for async
+/// - especially since we're shoving millions of samples per second at the same
+/// time.
+///
+/// therefore we use a separate thread to run all the slow control commands.
+/// we'll use one thread for all RtlSdr objects though.
+fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
+    fn set_tuner_gain(handle: &Handle, gain: Gain) -> Result<(), Error> {
+        match gain {
+            Gain::Manual(gain) => {
+                // manual gain mode must be enabled
+                handle.set_tuner_gain_mode(true)?;
+
+                // we need to find a supported gain value
+                if let Some(gain) = handle
+                    .tuner_gains
+                    .iter()
+                    .min_by_key(|supported| (**supported - gain).abs())
+                {
+                    handle.set_tuner_gain(*gain)?;
+                    Ok(())
+                }
+                else {
+                    Err(Error::NoSupportedGains)
+                }
+            }
+            Gain::Auto => {
+                handle.set_tuner_gain_mode(false)?;
+                Ok(())
+            }
+        }
+    }
+
+    fn set_xtal_frequency(
+        handle: &Handle,
+        rtl_xtal_frequency: Option<u32>,
+        tuner_xtal_frequency: Option<u32>,
+    ) -> Result<(), Error> {
+        let current = handle.get_xtal_frequency()?;
+        handle.set_xtal_frequency(
+            rtl_xtal_frequency.unwrap_or(current.0),
+            tuner_xtal_frequency.unwrap_or(current.1),
+        )
+    }
+
+    while let Some(command) = control_queue_receiver.blocking_recv() {
+        match command {
+            ControlMessage::SetCenterFrequency {
+                handle,
+                frequency,
+                result_sender,
+            } => {
+                let result = handle.set_center_frequency(frequency);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetSampleRate {
+                handle,
+                sample_rate,
+                result_sender,
+            } => {
+                let result = handle.set_sample_rate(sample_rate);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetTunerGain {
+                handle,
+                gain,
+                result_sender,
+            } => {
+                let result = set_tuner_gain(&handle, gain);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetTunerIfGain {
+                handle,
+                stage,
+                gain,
+                result_sender,
+            } => {
+                let result = handle.set_tuner_if_gain(stage, gain);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetTunerBandwidth {
+                handle,
+                bandwidth,
+                result_sender,
+            } => {
+                let result = handle.set_tuner_bandwidth(bandwidth);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetAgcMode {
+                handle,
+                enable,
+                result_sender,
+            } => {
+                let result = handle.set_agc_mode(enable);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetFrequencyCorrection {
+                handle,
+                ppm,
+                result_sender,
+            } => {
+                let result = handle.set_frequency_correction(ppm);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetOffsetTuning {
+                handle,
+                enable,
+                result_sender,
+            } => {
+                let result = handle.set_offset_tuning(enable);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetXtalFrequency {
+                handle,
+                rtl_xtal_frequency,
+                tuner_xtal_frequency,
+                result_sender,
+            } => {
+                let result = set_xtal_frequency(&handle, rtl_xtal_frequency, tuner_xtal_frequency);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::SetBiasTee {
+                handle,
+                pin,
+                enable,
+                result_sender,
+            } => {
+                let result = handle.set_bias_tee(pin, enable);
+                let _ = result_sender.send(result);
+            }
+        }
+    }
+}
+
+/// returns a sender to send commands to the control handler thread.
+fn get_control_queue_sender() -> mpsc::Sender<ControlMessage> {
+    const CONTROL_QUEUE_SIZE: usize = 128;
+
+    static CONTROL_QUEUE_SENDER: OnceLock<mpsc::Sender<ControlMessage>> = OnceLock::new();
+    let control_queue_sender = CONTROL_QUEUE_SENDER.get_or_init(|| {
+        tracing::debug!("spawning control thread");
+
+        let (control_queue_sender, control_queue_receiver) = mpsc::channel(CONTROL_QUEUE_SIZE);
+
+        thread::spawn(move || {
+            control_thread(control_queue_receiver);
+        });
+
+        control_queue_sender
+    });
+
+    control_queue_sender.clone()
+}
+
+enum ControlMessage {
+    SetCenterFrequency {
+        handle: Arc<Handle>,
+        frequency: u32,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetSampleRate {
+        handle: Arc<Handle>,
+        sample_rate: u32,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetTunerGain {
+        handle: Arc<Handle>,
+        gain: Gain,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetTunerIfGain {
+        handle: Arc<Handle>,
+        stage: i32,
+        gain: i32,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetTunerBandwidth {
+        handle: Arc<Handle>,
+        bandwidth: u32,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetAgcMode {
+        handle: Arc<Handle>,
+        enable: bool,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetFrequencyCorrection {
+        handle: Arc<Handle>,
+        ppm: i32,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetOffsetTuning {
+        handle: Arc<Handle>,
+        enable: bool,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetXtalFrequency {
+        handle: Arc<Handle>,
+        rtl_xtal_frequency: Option<u32>,
+        tuner_xtal_frequency: Option<u32>,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
+    SetBiasTee {
+        handle: Arc<Handle>,
+        pin: u8,
+        enable: bool,
+        result_sender: oneshot::Sender<Result<(), Error>>,
+    },
 }
 
 fn reader_thread(mut buffer_queue_writer: buffer_queue::Writer, handle: Arc<Handle>) {

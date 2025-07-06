@@ -29,7 +29,7 @@ use pin_project_lite::pin_project;
 
 /// 16 bit IQ sample
 ///
-/// 8 bits per component.
+/// 8 bits per component, mapped from [-128, 127] to [0, 255]
 #[derive(Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct IqSample {
@@ -59,23 +59,6 @@ impl IqSample {
         }
 
         square(self.i) + square(self.q)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum RawFrame {
-    ModeAc { data: [u8; 2] },
-    ModeSShort { data: [u8; 7] },
-    ModeSLong { data: [u8; 14] },
-}
-
-impl AsRef<[u8]> for RawFrame {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            RawFrame::ModeAc { data } => &data[..],
-            RawFrame::ModeSShort { data } => &data[..],
-            RawFrame::ModeSLong { data } => &data[..],
-        }
     }
 }
 
@@ -247,7 +230,7 @@ pub trait Configure {
         frequency: u32,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
-    fn set_bias_t(
+    fn set_bias_tee(
         &mut self,
         enable: bool,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
@@ -305,8 +288,8 @@ impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
         T::set_tuner_xtal(self, frequency)
     }
 
-    fn set_bias_t(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_bias_t(self, enable)
+    fn set_bias_tee(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_bias_tee(self, enable)
     }
 }
 
@@ -341,6 +324,12 @@ impl TunerType {
     pub const FC2580: Self = Self(4);
     pub const R820T: Self = Self(5);
     pub const R828D: Self = Self(6);
+}
+
+impl TunerType {
+    pub fn is_r82xx(&self) -> bool {
+        matches!(*self, TunerType::R828D | TunerType::R820T)
+    }
 }
 
 impl Debug for TunerType {
