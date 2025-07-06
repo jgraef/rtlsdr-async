@@ -4,19 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = "1.23.1"
+bytemuck = { version = "1.23.1", features = ["derive"] }
 bytes = "1.10.1"
-futures-util = "0.3.31"
-pin-project-lite = "0.2.16"
-thiserror = "2.0.12"
-tokio = { version = "1.46.0", default-features = false }
-hex = { version = "0.4.3", optional = true }
-tracing = "0.1.41"
-rtlsdr_sys = "1.1.0"
 derive_more = { version = "2.0.1", features = ["debug"] }
-tokio-util = "0.7.15"
-tokio-stream = { version = "0.1.17", features = ["sync"] }
+futures-util = "0.3.31"
+hex = { version = "0.4.3", optional = true }
 parking_lot = "0.12.4"
+pin-project-lite = "0.2.16"
+rtlsdr_sys = "1.1.0"
+thiserror = "2.0.12"
+tokio = { version = "1.46.0", default-features = false, optional = true }
+tokio-util = { version = "0.7.15", optional = true }
+#tokio-stream = { version = "0.1.17", features = ["sync"] }
+tracing = "0.1.41"
 
 [features]
-command = ["tokio/process", "dep:hex"]
+default = ["tcp"]
+full = ["tcp", "command"]
+command = ["dep:hex", "dep:tokio", "tokio/process"]
+tcp = ["dep:tokio", "dep:tokio-util", "tokio/net", "tokio/io-util", "tokio/macros", "tokio/rt"]

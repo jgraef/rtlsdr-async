@@ -8,16 +8,14 @@ use std::{
     },
 };
 
-use bytes::{
-    Buf,
-    BufMut,
-};
+use bytes::Buf;
 use pin_project_lite::pin_project;
 use tokio::{
     io::{
         AsyncRead,
         AsyncReadExt,
         AsyncWriteExt,
+        BufStream,
         ReadBuf,
     },
     net::{
@@ -31,33 +29,37 @@ use crate::{
     Configure,
     Gain,
     IqSample,
-    tcp::DongleInfo,
+    TunerType,
+    tcp::{
+        COMMAND_LENGTH,
+        Command,
+        DongleInfo,
+        HEADER_LENGTH,
+        MAGIC,
+        TunerGainMode,
+    },
     util::BufReadBytesExt,
 };
+
+/// size of the read buffer: 8 KiB
+const READ_BUFFER_SIZE: usize = 0x2000;
+
+/// size of the write buffer: 1 KiB, plenty for a few command
+const WRITE_BUFFER_SIZE: usize = 0x400;
 
 #[derive(Debug, thiserror::Error)]
 #[error("rtl_tcp client error")]
 pub enum Error {
     Io(#[from] std::io::Error),
+    InvalidMagic([u8; 4]),
 }
-
-const COMMAND_TUNER_FREQUENCY: u8 = 0x01;
-const COMMAND_SAMPLE_RATE: u8 = 0x02;
-const COMMAND_TUNER_GAIN_MODE: u8 = 0x03;
-const COMMAND_TUNER_GAIN_LEVEL: u8 = 0x04;
-//const COMMAND_TUNER_FREQUENCY_CORRECTION: u8 = 0x05;
-//const COMMAND_IF_GAIN_LEVEL: u8 = 0x06;
-//const COMMAND_TEST_MODE: u8 = 0x07;
-const COMMAND_AUTOMATIC_GAIN_CORRECTION: u8 = 0x08;
-//const COMMAND_DIRECT_SAMPLING: u8 = 0x09;
-//const COMMAND_OFFSET_TUNING: u8 = 0x0a;
 
 pin_project! {
     /// A client for `rtl_tcp`
     #[derive(Debug)]
     pub struct RtlTcpClient {
         #[pin]
-        stream: TcpStream,
+        stream: BufStream<TcpStream>,
         dongle_info: DongleInfo,
         incomplete_sample: Option<u8>,
     }
@@ -66,19 +68,26 @@ pin_project! {
 impl RtlTcpClient {
     /// Connnect to a `rtl_tcp` server.
     pub async fn connect<A: ToSocketAddrs>(address: A) -> Result<Self, Error> {
-        let mut stream = TcpStream::connect(address).await?;
+        let mut stream = BufStream::with_capacity(
+            READ_BUFFER_SIZE,
+            WRITE_BUFFER_SIZE,
+            TcpStream::connect(address).await?,
+        );
 
         // read dongle info
-        let mut header_buffer = [0; 12];
+        let mut header_buffer = [0; HEADER_LENGTH];
         stream.read_exact(&mut header_buffer).await?;
 
         let mut header_buffer = &header_buffer[..];
         let magic = header_buffer.get_bytes();
-        let tuner_type = header_buffer.get_u32();
+        if &magic != MAGIC {
+            return Err(Error::InvalidMagic(magic));
+        }
+
+        let tuner_type = TunerType(header_buffer.get_u32());
         let tuner_gain_type = header_buffer.get_u32();
 
         let dongle_info = DongleInfo {
-            magic,
             tuner_type,
             tuner_gain_type,
         };
@@ -97,15 +106,9 @@ impl RtlTcpClient {
 
     // todo: this always flushes the stream. would be nice to only flush once you're
     // done configuring
-    async fn send_command<F>(&mut self, command: u8, argument: F) -> Result<(), Error>
-    where
-        F: FnOnce(&mut &mut [u8]),
-    {
-        let mut output_buffer = [0; 5];
-
-        output_buffer[0] = command;
-        argument(&mut &mut output_buffer[1..]);
-
+    async fn send_command(&mut self, command: Command) -> Result<(), Error> {
+        let mut output_buffer = [0; COMMAND_LENGTH];
+        command.encode(&mut output_buffer[..]);
         self.stream.write_all(&output_buffer).await?;
         self.stream.flush().await?;
         Ok(())
@@ -116,38 +119,63 @@ impl Configure for RtlTcpClient {
     type Error = Error;
 
     async fn set_center_frequency(&mut self, frequency: u32) -> Result<(), Error> {
-        self.send_command(COMMAND_TUNER_FREQUENCY, |buffer| {
-            buffer.put_u32(frequency);
-        })
-        .await
-    }
-
-    async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
-        self.send_command(COMMAND_SAMPLE_RATE, |buffer| buffer.put_u32(sample_rate))
+        self.send_command(Command::SetCenterFrequency { frequency })
             .await
     }
 
-    async fn set_gain(&mut self, gain: Gain) -> Result<(), Error> {
+    async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
+        self.send_command(Command::SetSampleRate { sample_rate })
+            .await
+    }
+
+    async fn set_tuner_gain(&mut self, gain: Gain) -> Result<(), Error> {
         match gain {
             Gain::Manual(gain) => {
-                //self.send_command(COMMAND_TUNER_GAIN_MODE, |buffer| buffer.put_u32(1))
-                //    .await?;
-                self.send_command(COMMAND_TUNER_GAIN_LEVEL, |buffer| buffer.put_u32(gain))
+                self.send_command(Command::SetTunerGainMode {
+                    mode: TunerGainMode::Manual,
+                })
+                .await?;
+                self.send_command(Command::SetTunerGainLevel { gain })
                     .await?;
             }
             Gain::Auto => {
-                self.send_command(COMMAND_TUNER_GAIN_MODE, |buffer| buffer.put_u32(0))
-                    .await?;
+                self.send_command(Command::SetTunerGainMode {
+                    mode: TunerGainMode::Auto,
+                })
+                .await?;
             }
         }
         Ok(())
     }
 
     async fn set_agc_mode(&mut self, enable: bool) -> Result<(), Error> {
-        self.send_command(COMMAND_AUTOMATIC_GAIN_CORRECTION, |buffer| {
-            buffer.put_u32(if enable { 1 } else { 0 })
-        })
-        .await
+        self.send_command(Command::SetAgcMode { enable }).await
+    }
+
+    async fn set_frequency_correction(&mut self, ppm: i32) -> Result<(), Error> {
+        self.send_command(Command::SetFrequencyCorrection { ppm })
+            .await
+    }
+
+    async fn set_tuner_if_gain(&mut self, stage: i16, gain: i16) -> Result<(), Error> {
+        self.send_command(Command::SetTunerIfGain { stage, gain })
+            .await
+    }
+
+    async fn set_offset_tuning(&mut self, enable: bool) -> Result<(), Error> {
+        self.send_command(Command::SetOffsetTuning { enable }).await
+    }
+
+    async fn set_rtl_xtal(&mut self, frequency: u32) -> Result<(), Error> {
+        self.send_command(Command::SetRtlXtal { frequency }).await
+    }
+
+    async fn set_tuner_xtal(&mut self, frequency: u32) -> Result<(), Error> {
+        self.send_command(Command::SetTunerXtal { frequency }).await
+    }
+
+    async fn set_bias_t(&mut self, enable: bool) -> Result<(), Error> {
+        self.send_command(Command::SetBiasT { enable }).await
     }
 }
 

@@ -295,7 +295,7 @@ impl<S: Configure> DemodulateStream<S> {
             .set_center_frequency(frequency.unwrap_or(DOWNLINK_FREQUENCY))
             .await?;
         self.stream.set_sample_rate(SAMPLE_RATE).await?;
-        self.stream.set_gain(Gain::Auto).await?;
+        self.stream.set_tuner_gain(Gain::Auto).await?;
         self.stream.set_agc_mode(true).await?;
         Ok(())
     }

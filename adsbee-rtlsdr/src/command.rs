@@ -6,7 +6,6 @@ use tokio::{
         BufReader,
     },
     process::{
-        Child,
         ChildStdout,
         Command,
     },
@@ -26,7 +25,6 @@ pub enum Error {
 /// Spawns `rtl_adsb` and reads its output.
 #[derive(Debug)]
 pub struct RtlAdsbCommand {
-    process: Child,
     stdout: BufReader<ChildStdout>,
     buffer: String,
 }
@@ -42,7 +40,6 @@ impl RtlAdsbCommand {
             .spawn()?;
         let stdout = BufReader::new(process.stdout.take().expect("missing stdout"));
         Ok(Self {
-            process,
             stdout,
             buffer: String::with_capacity(128),
         })

@@ -34,7 +34,6 @@ use adsbee_mode_s as mode_s;
 use adsbee_rtlsdr::{
     AsyncReadSamples,
     Configure,
-    Gain,
     RawFrame,
     RtlSdr,
     demodulator::{
@@ -43,7 +42,6 @@ use adsbee_rtlsdr::{
         Quality,
     },
     tcp::{
-        DongleInfo,
         client::RtlTcpClient,
         server::RtlSdrServer,
     },
@@ -248,23 +246,11 @@ async fn main() -> Result<(), Error> {
             }
         }
         Command::RtlSdrServer { device, address } => {
-            let mut rtl_sdr = RtlSdr::open(device.unwrap_or_default().try_into().unwrap())?;
-            rtl_sdr.set_center_frequency(1090000000).await?;
-            rtl_sdr.set_sample_rate(2_000_000).await?;
-            rtl_sdr.set_gain(Gain::Auto).await?;
-            rtl_sdr.set_agc_mode(true).await?;
+            let rtl_sdr = RtlSdr::open(device.unwrap_or_default().try_into().unwrap())?;
             let tcp_listener = TcpListener::bind(address).await?;
-            RtlSdrServer::new(
-                rtl_sdr,
-                tcp_listener,
-                DongleInfo {
-                    magic: *b"RTL0",
-                    tuner_type: 6,
-                    tuner_gain_type: 29,
-                },
-            )
-            .serve()
-            .await?;
+            RtlSdrServer::from_rtl_sdr(rtl_sdr, tcp_listener)
+                .serve()
+                .await?;
         }
     }
 

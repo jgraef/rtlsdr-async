@@ -2,10 +2,12 @@ mod bindings;
 #[cfg(feature = "command")]
 pub mod command;
 pub mod demodulator;
+#[cfg(feature = "tcp")]
 pub mod tcp;
 pub(crate) mod util;
 
 use std::{
+    fmt::Debug,
     pin::Pin,
     task::{
         Context,
@@ -197,21 +199,58 @@ pub trait Configure {
     fn set_center_frequency(
         &mut self,
         frequency: u32,
-    ) -> impl Future<Output = Result<(), Self::Error>>;
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     /// Set sample rate in Hz
     fn set_sample_rate(
         &mut self,
         sample_rate: u32,
-    ) -> impl Future<Output = Result<(), Self::Error>>;
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     /// Set tuner gain, in tenths of a dB
-    fn set_gain(&mut self, gain: Gain) -> impl Future<Output = Result<(), Self::Error>>;
+    fn set_tuner_gain(
+        &mut self,
+        gain: Gain,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     /// Set the automatic gain correction, a software step to correct the
     /// incoming signal, this is not automatic gain control on the hardware
     /// chip, that is controlled by tuner gain mode.
-    fn set_agc_mode(&mut self, enabled: bool) -> impl Future<Output = Result<(), Self::Error>>;
+    fn set_agc_mode(
+        &mut self,
+        enable: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
+
+    fn set_frequency_correction(
+        &mut self,
+        ppm: i32,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
+
+    fn set_tuner_if_gain(
+        &mut self,
+        stage: i16,
+        gain: i16,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
+
+    fn set_offset_tuning(
+        &mut self,
+        enable: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
+
+    fn set_rtl_xtal(
+        &mut self,
+        frequency: u32,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
+
+    fn set_tuner_xtal(
+        &mut self,
+        frequency: u32,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
+
+    fn set_bias_t(
+        &mut self,
+        enable: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 }
 
 impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
@@ -231,19 +270,90 @@ impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
         T::set_sample_rate(*self, sample_rate)
     }
 
-    fn set_gain(&mut self, gain: Gain) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_gain(*self, gain)
+    fn set_tuner_gain(&mut self, gain: Gain) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_tuner_gain(*self, gain)
     }
 
-    fn set_agc_mode(&mut self, enabled: bool) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_agc_mode(*self, enabled)
+    fn set_agc_mode(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_agc_mode(*self, enable)
+    }
+
+    fn set_frequency_correction(
+        &mut self,
+        ppm: i32,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_frequency_correction(self, ppm)
+    }
+
+    fn set_tuner_if_gain(
+        &mut self,
+        stage: i16,
+        gain: i16,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_tuner_if_gain(self, stage, gain)
+    }
+
+    fn set_offset_tuning(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_offset_tuning(self, enable)
+    }
+
+    fn set_rtl_xtal(&mut self, frequency: u32) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_rtl_xtal(self, frequency)
+    }
+
+    fn set_tuner_xtal(&mut self, frequency: u32) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_tuner_xtal(self, frequency)
+    }
+
+    fn set_bias_t(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_bias_t(self, enable)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gain {
     /// Gain tenths of a dB
-    Manual(u32),
+    Manual(i32),
     /// Auto gain control
     Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TunerGainMode {
+    Manual,
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DirectSamplingMode {
+    I,
+    Q,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TunerType(pub u32);
+
+impl TunerType {
+    pub const UNKNOWN: Self = Self(0);
+    pub const E4000: Self = Self(1);
+    pub const FC0012: Self = Self(2);
+    pub const FC0013: Self = Self(3);
+    pub const FC2580: Self = Self(4);
+    pub const R820T: Self = Self(5);
+    pub const R828D: Self = Self(6);
+}
+
+impl Debug for TunerType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::UNKNOWN => write!(f, "TunerType::UNKNOWN"),
+            Self::E4000 => write!(f, "TunerType::E4000"),
+            Self::FC0012 => write!(f, "TunerType::FC0012"),
+            Self::FC0013 => write!(f, "TunerType::FC0013"),
+            Self::FC2580 => write!(f, "TunerType::FC2580"),
+            Self::R820T => write!(f, "TunerType::R820T"),
+            Self::R828D => write!(f, "TunerType::R828D"),
+            _ => write!(f, "TunerType({})", self.0),
+        }
+    }
 }

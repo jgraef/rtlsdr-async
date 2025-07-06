@@ -17,18 +17,21 @@ use std::{
     },
     thread::{
         self,
-        JoinHandle,
     },
 };
 
 use parking_lot::Mutex;
-use rtlsdr_sys::rtlsdr_read_sync;
+use rtlsdr_sys::{
+    rtlsdr_get_center_freq,
+    rtlsdr_read_sync,
+};
 
 use crate::{
     AsyncReadSamples,
     Configure,
     Gain,
     IqSample,
+    TunerType,
 };
 
 const DEFAULT_BUFFER_SIZE: usize = 0x4000; // 16 KiB
@@ -36,15 +39,21 @@ const DEFAULT_QUEUE_SIZE: usize = 64; // total of 1 MiB buffers
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("librtlsdr error: {0}")]
-    LibRtlSdr(i32),
+    #[error("librtlsdr error: {function} retured {value}")]
+    LibRtlSdr { function: &'static str, value: i32 },
     #[error("device handler thread died unexpectedly")]
     DeviceThreadDead,
+    #[error("can't select gain level, because librtlsdr doesn't report any supported gain levels")]
+    NoSupportedGains,
+    #[error("unknown tuner")]
+    UnknownTuner,
+    #[error("operation not supported")]
+    Unsupported,
 }
 
 impl Error {
-    pub fn from_lib(value: i32) -> Self {
-        Self::LibRtlSdr(value)
+    pub fn from_lib(function: &'static str, value: i32) -> Self {
+        Self::LibRtlSdr { function, value }
     }
 }
 
@@ -192,6 +201,10 @@ struct Handle {
     // the mutex is separate because it's only used to synchronize control operations (everything
     // that isn't a read).
     control_lock: Mutex<()>,
+
+    tuner_type: TunerType,
+
+    tuner_gains: TunerGains,
 }
 
 unsafe impl Send for Handle {}
@@ -202,70 +215,262 @@ impl Handle {
         let mut handle: rtlsdr_sys::rtlsdr_dev_t = null_mut();
         let ret =
             unsafe { rtlsdr_sys::rtlsdr_open(&mut handle as *mut rtlsdr_sys::rtlsdr_dev_t, index) };
+        if ret != 0 {
+            return Err(Error::from_lib("rtlsdr_open", ret));
+        }
+
+        // get the tuner type.
+        let ret: u32 = unsafe { rtlsdr_sys::rtlsdr_get_tuner_type(handle) } as u32;
+        tracing::debug!(ret, "rtlsdr_get_tuner_type");
         if ret == 0 {
-            Ok(Handle {
-                handle,
-                control_lock: Mutex::new(()),
-            })
+            return Err(Error::UnknownTuner);
+        }
+        let tuner_type = TunerType(ret);
+
+        // get the tuner gains now, so we can hand them out as a slice later. this way
+        // we don't need to allocate a Vec everytime get_tuner_gains is called.
+        // furthermore the arrays returned by librtlsdr are fixed and as of writing
+        // don't exceed 29 entries.
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_tuner_gains(handle, null_mut()) };
+        let mut tuner_gains = TunerGains::default();
+        if ret <= 64 && ret > 0 {
+            let ret2 = unsafe {
+                rtlsdr_sys::rtlsdr_get_tuner_gains(handle, tuner_gains.values.as_mut_ptr())
+            };
+            assert_eq!(
+                ret, ret2,
+                "rtlsdr_get_tuner_gains returned 2 different lengths"
+            );
+        }
+        tracing::debug!(gains = ?tuner_gains, "rtlsdr_get_tuner_gains");
+
+        Ok(Handle {
+            handle,
+            control_lock: Mutex::new(()),
+            tuner_type,
+            tuner_gains,
+        })
+    }
+
+    fn get_center_frequency(&self) -> Result<u32, Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_get_center_freq(self.handle) };
+        tracing::debug!(ret, "rtlsdr_get_center_freq");
+        if ret == 0 {
+            Err(Error::from_lib("rtlsdr_get_center_freq", 0))
         }
         else {
-            Err(Error::from_lib(ret))
+            Ok(ret)
         }
     }
 
     fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
         let _guard = self.control_lock.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_center_freq(self.handle, frequency) };
+        tracing::debug!(ret, frequency, "rtlsdr_set_center_freq");
         if ret == 0 {
             Ok(())
         }
         else {
-            Err(Error::from_lib(ret))
+            Err(Error::from_lib("rtlsdr_set_center_freq", ret))
+        }
+    }
+
+    fn get_sample_rate(&self) -> Result<u32, Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_sample_rate(self.handle) };
+        tracing::debug!(ret, "rtlsdr_get_sample_rate");
+        if ret == 0 {
+            Ok(ret)
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_get_sample_rate", ret as i32))
         }
     }
 
     fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
         let _guard = self.control_lock.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_sample_rate(self.handle, sample_rate) };
+        tracing::debug!(ret, sample_rate, "rtlsdr_set_sample_rate");
         if ret == 0 {
             Ok(())
         }
         else {
-            Err(Error::from_lib(ret))
+            Err(Error::from_lib("rtlsdr_set_sample_rate", ret))
         }
     }
 
     fn set_tuner_gain_mode(&self, manual: bool) -> Result<(), Error> {
         let _guard = self.control_lock.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_gain_mode(self.handle, manual as i32) };
+        tracing::debug!(ret, ?manual, "rtlsdr_set_tuner_gain_mode");
         if ret == 0 {
             Ok(())
         }
         else {
-            Err(Error::from_lib(ret))
+            Err(Error::from_lib("rtlsdr_set_tuner_gain_mode", ret))
         }
     }
 
-    fn set_tuner_gain(&self, gain: u32) -> Result<(), Error> {
+    fn get_tuner_gain(&self) -> Result<i32, Error> {
         let _guard = self.control_lock.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_gain(self.handle, gain as i32) };
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_tuner_gain(self.handle) };
+        tracing::debug!(ret, "rtlsdr_get_tuner_gain");
+        // note: looking at the librtlsdr source it looks like that 0 is also a valid
+        // gain value. rtlsdr_get_tuner_gain only fails if the provided dev
+        // handle is null, which it isn't. but it will set dev->gain (the value
+        // returrned here) to 0, if set_gain failed
         if ret == 0 {
-            Ok(())
+            Err(Error::from_lib("rtlsdr_get_tuner_gain", ret))
         }
         else {
-            Err(Error::from_lib(ret))
+            Ok(ret)
         }
     }
 
-    fn set_agc_mode(&self, enabled: bool) -> Result<(), Error> {
+    fn set_tuner_gain(&self, gain: i32) -> Result<(), Error> {
         let _guard = self.control_lock.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_agc_mode(self.handle, enabled as i32) };
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_gain(self.handle, gain) };
+        tracing::debug!(ret, gain, "rtlsdr_set_tuner_gain");
         if ret == 0 {
             Ok(())
         }
         else {
-            Err(Error::from_lib(ret))
+            Err(Error::from_lib("rtlsdr_set_tuner_gain", ret))
         }
+    }
+
+    fn set_tuner_if_gain(&self, stage: i32, gain: i32) -> Result<(), Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_if_gain(self.handle, stage, gain) };
+        tracing::debug!(ret, gain, "rtlsdr_set_tuner_if_gain");
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_tuner_if_gain", ret))
+        }
+    }
+
+    fn set_tuner_bandwidth(&self, bandwidth: u32) -> Result<(), Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_bandwidth(self.handle, bandwidth) };
+        tracing::debug!(ret, bandwidth, "rtlsdr_set_tuner_bandwidth");
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_tuner_bandwidth", ret))
+        }
+    }
+
+    fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_agc_mode(self.handle, enable as i32) };
+        tracing::debug!(ret, ?enable, "rtlsdr_set_agc_mode");
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_agc_mode", ret))
+        }
+    }
+
+    fn get_frequency_correction(&self) -> Result<i32, Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_freq_correction(self.handle) };
+        tracing::debug!(ret, "rtlsdr_get_freq_correction");
+        // note: only returns errors for dev=null, and besides 0 is a valid return value
+        Ok(ret)
+    }
+
+    fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_freq_correction(self.handle, ppm) };
+        tracing::debug!(ret, ?ppm, "rtlsdr_set_freq_correction");
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_freq_correction", ret))
+        }
+    }
+
+    fn get_offset_tuning(&self) -> Result<bool, Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_offset_tuning(self.handle) };
+        tracing::debug!(ret, "rtlsdr_get_offset_tuning");
+        // note: only returns errors for dev=null
+        assert!(ret == 0 || ret == 1);
+        Ok(ret == 1)
+    }
+
+    fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_offset_tuning(self.handle, enable as i32) };
+        tracing::debug!(ret, ?enable, "rtlsdr_set_offset_tuning");
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_offset_tuning", ret))
+        }
+    }
+
+    fn get_xtal_frequency(&self) -> Result<(u32, u32), Error> {
+        let _guard = self.control_lock.lock();
+        let mut rtl_frequency = 0;
+        let mut tuner_frequency = 0;
+        let ret = unsafe {
+            rtlsdr_sys::rtlsdr_get_xtal_freq(
+                self.handle,
+                &mut rtl_frequency as *mut u32,
+                &mut tuner_frequency as *mut u32,
+            )
+        };
+        tracing::debug!(
+            ret,
+            ?rtl_frequency,
+            ?tuner_frequency,
+            "rtlsdr_get_xtal_freq"
+        );
+        // note: only returns errors for dev=null
+        assert_eq!(ret, 0);
+        Ok((rtl_frequency, tuner_frequency))
+    }
+
+    fn set_xtal_frequency(&self, rtl_frequency: u32, tuner_frequency: u32) -> Result<(), Error> {
+        let _guard = self.control_lock.lock();
+        let ret = unsafe {
+            rtlsdr_sys::rtlsdr_set_xtal_freq(self.handle, rtl_frequency, tuner_frequency)
+        };
+        tracing::debug!(
+            ret,
+            ?rtl_frequency,
+            ?tuner_frequency,
+            "rtlsdr_set_xtal_freq"
+        );
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_xtal_freq", ret))
+        }
+    }
+
+    fn set_bias_t(&self, _pin: u8, _enable: bool) -> Result<(), Error> {
+        // todo: missing from ffi bindings
+
+        /*let _guard = self.control_lock.lock();
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_bias_tee_gpio(self.handle, pin.into(), enable as i32) };
+        tracing::debug!(ret, ?rtl_frequency, ?tuner_frequency, "rtlsdr_set_bias_tee_gpio");
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_bias_tee_gpio", ret))
+        }*/
+        Err(Error::Unsupported)
     }
 
     // not synchronized! this must only be used in the reader_thread
@@ -288,7 +493,7 @@ impl Handle {
             Ok(n_read.try_into().unwrap())
         }
         else {
-            Err(Error::from_lib(ret))
+            Err(Error::from_lib("rtlsdr_read_sync", ret))
         }
     }
 
@@ -304,6 +509,41 @@ impl Drop for Handle {
         unsafe {
             rtlsdr_sys::rtlsdr_close(self.handle);
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TunerGains {
+    values: [i32; Self::CAPACITY],
+    length: usize,
+}
+
+impl Default for TunerGains {
+    fn default() -> Self {
+        Self {
+            values: [0; Self::CAPACITY],
+            length: 0,
+        }
+    }
+}
+
+impl TunerGains {
+    const CAPACITY: usize = 64;
+
+    fn iter(&self) -> std::slice::Iter<'_, i32> {
+        self.values[..self.length].iter()
+    }
+}
+
+impl AsRef<[i32]> for TunerGains {
+    fn as_ref(&self) -> &[i32] {
+        &self.values[..self.length]
+    }
+}
+
+impl Debug for TunerGains {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 
@@ -331,6 +571,8 @@ impl RtlSdr {
 
     fn open_impl(index: u32, queue_size: usize, buffer_size: usize) -> Result<Self, Error> {
         let handle = Arc::new(Handle::open(index)?);
+
+        // this is needed for reads to work
         handle.reset_buffer();
 
         let (buffer_queue_writer, buffer_queue_reader) =
@@ -349,6 +591,113 @@ impl RtlSdr {
             buffer: None,
             buffer_pos: 0,
         })
+    }
+
+    pub fn get_center_frquency(&self) -> Result<u32, Error> {
+        self.handle.get_center_frequency()
+    }
+
+    pub fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
+        self.handle.set_center_frequency(frequency)
+    }
+
+    pub fn get_sample_rate(&self) -> Result<u32, Error> {
+        self.handle.get_sample_rate()
+    }
+
+    pub fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
+        self.handle.set_sample_rate(sample_rate)
+    }
+
+    pub fn get_tuner_type(&self) -> TunerType {
+        self.handle.tuner_type
+    }
+
+    pub fn get_tuner_gains(&self) -> &[i32] {
+        self.handle.tuner_gains.as_ref()
+    }
+
+    pub fn get_tuner_gain(&self) -> Result<i32, Error> {
+        self.handle.get_tuner_gain()
+    }
+
+    pub fn set_tuner_gain(&self, gain: Gain) -> Result<(), Error> {
+        match gain {
+            Gain::Manual(gain) => {
+                // manual gain mode must be enabled
+                self.handle.set_tuner_gain_mode(true)?;
+
+                // we need to find a supported gain value
+                if let Some(gain) = self
+                    .handle
+                    .tuner_gains
+                    .iter()
+                    .min_by_key(|supported| (**supported - gain).abs())
+                {
+                    self.handle.set_tuner_gain(*gain)?;
+                    Ok(())
+                }
+                else {
+                    Err(Error::NoSupportedGains)
+                }
+            }
+            Gain::Auto => {
+                self.handle.set_tuner_gain_mode(false)?;
+                Ok(())
+            }
+        }
+    }
+
+    pub fn set_tuner_if_gain(&self, stage: i32, gain: i32) -> Result<(), Error> {
+        self.handle.set_tuner_if_gain(stage, gain)
+    }
+
+    pub fn set_tuner_bandwidth(&self, bandwidth: u32) -> Result<(), Error> {
+        self.handle.set_tuner_bandwidth(bandwidth)
+    }
+
+    pub fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
+        self.handle.set_agc_mode(enable)
+    }
+
+    pub fn get_frequency_correction(&self) -> Result<i32, Error> {
+        self.handle.get_frequency_correction()
+    }
+
+    pub fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
+        self.handle.set_frequency_correction(ppm)
+    }
+
+    pub fn get_offset_tuning(&self) -> Result<bool, Error> {
+        self.handle.get_offset_tuning()
+    }
+
+    pub fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
+        self.handle.set_offset_tuning(enable)
+    }
+
+    pub fn get_rtl_xtal(&self) -> Result<u32, Error> {
+        let (rtl_frequency, _tuner_frequency) = self.handle.get_xtal_frequency()?;
+        Ok(rtl_frequency)
+    }
+
+    pub fn set_rtl_xtal(&self, frequency: u32) -> Result<(), Error> {
+        let (_rtl_frequency, tuner_frequency) = self.handle.get_xtal_frequency()?;
+        self.handle.set_xtal_frequency(frequency, tuner_frequency)
+    }
+
+    pub fn get_tuner_xtal(&self) -> Result<u32, Error> {
+        let (_rtl_frequency, tuner_frequency) = self.handle.get_xtal_frequency()?;
+        Ok(tuner_frequency)
+    }
+
+    pub fn set_tuner_xtal(&self, frequency: u32) -> Result<(), Error> {
+        let (rtl_frequency, _tuner_frequency) = self.handle.get_xtal_frequency()?;
+        self.handle.set_xtal_frequency(rtl_frequency, frequency)
+    }
+
+    pub fn set_bias_t(&self, enable: bool) -> Result<(), Error> {
+        self.handle.set_bias_t(0, enable)
     }
 }
 
@@ -407,31 +756,43 @@ impl Configure for RtlSdr {
     type Error = Error;
 
     async fn set_center_frequency(&mut self, frequency: u32) -> Result<(), Error> {
-        self.handle.set_center_frequency(frequency)?;
-        Ok(())
+        RtlSdr::set_center_frequency(&*self, frequency)
     }
 
     async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
-        self.handle.set_sample_rate(sample_rate)?;
-        Ok(())
+        RtlSdr::set_sample_rate(&*self, sample_rate)
     }
 
-    async fn set_gain(&mut self, gain: Gain) -> Result<(), Error> {
-        match gain {
-            Gain::Manual(gain) => {
-                self.handle.set_tuner_gain_mode(true)?;
-                self.handle.set_tuner_gain(gain)?;
-            }
-            Gain::Auto => {
-                self.handle.set_tuner_gain_mode(false)?;
-            }
-        }
-        Ok(())
+    async fn set_tuner_gain(&mut self, gain: Gain) -> Result<(), Error> {
+        RtlSdr::set_tuner_gain(&*self, gain)
     }
 
-    async fn set_agc_mode(&mut self, enabled: bool) -> Result<(), Error> {
-        self.handle.set_agc_mode(enabled)?;
-        Ok(())
+    async fn set_agc_mode(&mut self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_agc_mode(&*self, enable)
+    }
+
+    async fn set_frequency_correction(&mut self, ppm: i32) -> Result<(), Error> {
+        RtlSdr::set_frequency_correction(&*self, ppm)
+    }
+
+    async fn set_tuner_if_gain(&mut self, stage: i16, gain: i16) -> Result<(), Error> {
+        RtlSdr::set_tuner_if_gain(&*self, stage.into(), gain.into())
+    }
+
+    async fn set_offset_tuning(&mut self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_offset_tuning(&*self, enable)
+    }
+
+    async fn set_rtl_xtal(&mut self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_rtl_xtal(&*self, frequency)
+    }
+
+    async fn set_tuner_xtal(&mut self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_tuner_xtal(&*self, frequency)
+    }
+
+    async fn set_bias_t(&mut self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_bias_t(&*self, enable)
     }
 }
 
