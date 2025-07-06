@@ -112,6 +112,18 @@ pub trait AsyncReadSamples {
     ) -> Poll<Result<usize, Self::Error>>;
 }
 
+impl<T: ?Sized + AsyncReadSamples + Unpin> AsyncReadSamples for &mut T {
+    type Error = <T as AsyncReadSamples>::Error;
+
+    fn poll_read_samples(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [IqSample],
+    ) -> Poll<Result<usize, Self::Error>> {
+        Pin::new(&mut **self).poll_read_samples(cx, buffer)
+    }
+}
+
 pub trait AsyncReadSamplesExt: AsyncReadSamples {
     fn read_samples<'a>(&'a mut self, buffer: &'a mut [IqSample]) -> ReadSamples<'a, Self>
     where
@@ -200,6 +212,32 @@ pub trait Configure {
     /// incoming signal, this is not automatic gain control on the hardware
     /// chip, that is controlled by tuner gain mode.
     fn set_agc_mode(&mut self, enabled: bool) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
+    type Error = <T as Configure>::Error;
+
+    fn set_center_frequency(
+        &mut self,
+        frequency: u32,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_center_frequency(*self, frequency)
+    }
+
+    fn set_sample_rate(
+        &mut self,
+        sample_rate: u32,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_sample_rate(*self, sample_rate)
+    }
+
+    fn set_gain(&mut self, gain: Gain) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_gain(*self, gain)
+    }
+
+    fn set_agc_mode(&mut self, enabled: bool) -> impl Future<Output = Result<(), Self::Error>> {
+        T::set_agc_mode(*self, enabled)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

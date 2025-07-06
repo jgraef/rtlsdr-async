@@ -207,7 +207,6 @@ async fn main() -> Result<(), Error> {
             }
             else {
                 let rtl_sdr = RtlSdr::open(device.unwrap_or_default().try_into().unwrap())?;
-
                 run_rtl_sdr(rtl_sdr, frequency, dump_file).await?;
             }
 
