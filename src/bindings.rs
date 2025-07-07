@@ -649,6 +649,9 @@ impl Debug for TunerGains {
 /// This provides an async interface [`AsyncReadSamples`] to read IQ samples
 /// from the device, and several methods to configure it.
 ///
+/// [`RtlSdr`] is cheaply cloneable! All copies will read from the same
+/// underlying device.
+///
 /// # Internals
 ///
 /// Internally this spawns 2 threads:
