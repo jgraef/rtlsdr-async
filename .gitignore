@@ -14,6 +14,4 @@ Thumbs.db
 # Env vars
 .env
 
-/tmp
 /rustc-ice-*
-/test
