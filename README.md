@@ -2,7 +2,7 @@
 
 This crate provides async bindings for the [librtlsdr][1] C library.
 
-## [Example](examples/hello_rtlsdr.rs)
+## [Example](rtlsdr-async/examples/hello_rtlsdr.rs)
 
 ```rust
 // open first RTL-SDR found
