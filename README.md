@@ -39,3 +39,5 @@ loop {
     println!("{i:.4} {q:.4}i");
 }
 ```
+
+[1]: https://gitea.osmocom.org/sdr/rtl-sdr
