@@ -1,5 +1,3 @@
-//! <https://k3xec.com/rtl-tcp/>
-
 use std::{
     pin::Pin,
     task::{
@@ -30,7 +28,8 @@ use crate::{
     Gain,
     IqSample,
     TunerType,
-    tcp::{
+    rtl_tcp::{
+        BufReadBytesExt,
         COMMAND_LENGTH,
         Command,
         DongleInfo,
@@ -38,7 +37,6 @@ use crate::{
         MAGIC,
         TunerGainMode,
     },
-    util::BufReadBytesExt,
 };
 
 /// size of the read buffer: 8 KiB
@@ -67,6 +65,9 @@ pin_project! {
 
 impl RtlTcpClient {
     /// Connnect to a `rtl_tcp` server.
+    ///
+    /// This implements [`AsyncReadSamples`] for async reading of IQ samples,
+    /// and [`Configure`] to configure the receiver.
     pub async fn connect<A: ToSocketAddrs>(address: A) -> Result<Self, Error> {
         let mut stream = BufStream::with_capacity(
             READ_BUFFER_SIZE,
@@ -85,11 +86,11 @@ impl RtlTcpClient {
         }
 
         let tuner_type = TunerType(header_buffer.get_u32());
-        let tuner_gain_type = header_buffer.get_u32();
+        let tuner_gain_count = header_buffer.get_u32();
 
         let dongle_info = DongleInfo {
             tuner_type,
-            tuner_gain_type,
+            tuner_gain_count,
         };
         tracing::debug!(?dongle_info);
 
@@ -104,9 +105,8 @@ impl RtlTcpClient {
         &self.dongle_info
     }
 
-    // todo: this always flushes the stream. would be nice to only flush once you're
-    // done configuring
-    async fn send_command(&mut self, command: Command) -> Result<(), Error> {
+    /// Sends a command to the server.
+    pub async fn send_command(&mut self, command: Command) -> Result<(), Error> {
         let mut output_buffer = [0; COMMAND_LENGTH];
         command.encode(&mut output_buffer[..]);
         self.stream.write_all(&output_buffer).await?;

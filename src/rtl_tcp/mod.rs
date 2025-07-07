@@ -1,3 +1,11 @@
+//! Client and server implementation for the `rtl_tcp` protocol.
+//!
+//! The protocol is outlined [here][1], but the `rtl_tcp` [source code] was used
+//! for reference.
+//!
+//! [1]: https://k3xec.com/rtl-tcp/
+//! [2]: https://github.com/rtlsdrblog/rtl-sdr-blog/blob/master/src/rtl_tcp.c
+
 use bytes::{
     Buf,
     BufMut,
@@ -7,12 +15,12 @@ use crate::{
     DirectSamplingMode,
     TunerGainMode,
     TunerType,
-    util::BufReadBytesExt,
 };
 
 pub mod client;
 pub mod server;
 
+/// Commands that can be send to the server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     SetCenterFrequency { frequency: u32 },
@@ -193,6 +201,7 @@ impl Command {
     }
 }
 
+/// Error for when an invalid command is received.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, thiserror::Error)]
 #[error("Invalid rtl_tcp command: 0x{command:02} (arguments: {arguments:?})")]
 pub struct InvalidCommand {
@@ -200,12 +209,37 @@ pub struct InvalidCommand {
     pub arguments: [u8; 4],
 }
 
+/// Information about the SDR dongle that is sent by the server.
 #[derive(Clone, Copy, Debug)]
 pub struct DongleInfo {
+    /// Tuner type as reported by librtlsdr
     pub tuner_type: TunerType,
-    pub tuner_gain_type: u32,
+
+    /// Number of gain levels supported by the tuner.
+    pub tuner_gain_count: u32,
 }
 
+/// Header length in bytes.
+///
+/// This consists of 4 bytes [`MAGIC`] and 8 bytes [`DongleInfo`].
 pub const HEADER_LENGTH: usize = 12;
+
+/// Length of a command in bytes
+///
+/// 1 byte for the command opcode, 4 bytes for the arguments.
 pub const COMMAND_LENGTH: usize = 5;
+
+/// Magic value sent by server to identify the protocol.
 pub const MAGIC: &'static [u8; 4] = b"RTL0";
+
+pub(crate) trait BufReadBytesExt {
+    fn get_bytes<const N: usize>(&mut self) -> [u8; N];
+}
+
+impl<B: Buf> BufReadBytesExt for B {
+    fn get_bytes<const N: usize>(&mut self) -> [u8; N] {
+        let mut data: [u8; N] = [0; N];
+        self.copy_to_slice(&mut data[..]);
+        data
+    }
+}

@@ -19,6 +19,8 @@ use std::{
     },
 };
 
+pub use buffer_queue::Buffer;
+use futures_core::Stream;
 use parking_lot::Mutex;
 use rtlsdr_sys::{
     rtlsdr_get_center_freq,
@@ -49,6 +51,7 @@ const DEFAULT_BUFFER_SIZE: usize = 0x4000; // 16 KiB
 /// or ~436 ms of samples.
 const DEFAULT_QUEUE_SIZE: usize = 64;
 
+/// Errors returned by an [`RtlSdr`]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("librtlsdr error: {function} retured {value}")]
@@ -68,11 +71,12 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn from_lib(function: &'static str, value: i32) -> Self {
+    fn from_lib(function: &'static str, value: i32) -> Self {
         Self::LibRtlSdr { function, value }
     }
 }
 
+/// Returns an iterator over the available RTL-SDRs.
 pub fn devices() -> DeviceIter {
     let device_count = unsafe { rtlsdr_sys::rtlsdr_get_device_count() };
 
@@ -82,6 +86,9 @@ pub fn devices() -> DeviceIter {
     }
 }
 
+/// Iterator over available devices.
+///
+/// This yields [`DeviceInfo`]s.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceIter {
     device_count: u32,
@@ -137,6 +144,7 @@ impl Iterator for DeviceIter {
     }
 }
 
+/// RTL-SDR device information.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceInfo {
     index: u32,
@@ -167,6 +175,7 @@ impl DeviceInfo {
         self.usb_strings.as_ref().and_then(|s| s.serial.as_str())
     }
 
+    /// Open the device
     pub fn open(&self) -> Result<RtlSdr, Error> {
         RtlSdr::open(self.index)
     }
@@ -219,8 +228,8 @@ struct Handle {
     // handle itself, because we want to do reads with it concurrently with other control commands.
     state: Mutex<HandleState>,
 
+    index: u32,
     tuner_type: TunerType,
-
     tuner_gains: TunerGains,
 }
 
@@ -240,6 +249,7 @@ impl Handle {
         let mut handle: rtlsdr_sys::rtlsdr_dev_t = null_mut();
         let ret =
             unsafe { rtlsdr_sys::rtlsdr_open(&mut handle as *mut rtlsdr_sys::rtlsdr_dev_t, index) };
+        tracing::debug!(?index, ?ret, "rtlsdr_open");
         if ret != 0 {
             return Err(Error::from_lib("rtlsdr_open", ret));
         }
@@ -285,6 +295,7 @@ impl Handle {
             state: Mutex::new(HandleState {
                 tuner_gain_mode: None,
             }),
+            index,
             tuner_type,
             tuner_gains,
         })
@@ -591,6 +602,7 @@ impl Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
+        tracing::debug!(index = self.index, "rtl_sdr_close");
         unsafe {
             rtlsdr_sys::rtlsdr_close(self.handle);
         }
@@ -632,6 +644,20 @@ impl Debug for TunerGains {
     }
 }
 
+/// An RTL-SDR.
+///
+/// This provides an async interface [`AsyncReadSamples`] to read IQ samples
+/// from the device, and several methods to configure it.
+///
+/// # Internals
+///
+/// Internally this spawns 2 threads:
+///
+/// 1. A thread that handles slow control commands like
+///    [`Self::set_center_frequency`]. There will only ever be one control
+///    thread for all devices.
+/// 2. A thread that reads IQ samples from the device. Each [`RtlSdr`] will
+///    spawn its own reader thread.
 #[derive(Clone)]
 pub struct RtlSdr {
     /// the handle for the rtlsdr. this also provides convenient methods. all
@@ -645,6 +671,9 @@ pub struct RtlSdr {
 }
 
 impl RtlSdr {
+    /// Open an RTL-SDR with the given index.
+    ///
+    /// You can enumerate the available devices with [`devices`].
     pub fn open(index: u32) -> Result<Self, Error> {
         Self::open_impl(index, DEFAULT_QUEUE_SIZE, DEFAULT_BUFFER_SIZE)
     }
@@ -891,6 +920,19 @@ impl AsyncReadSamples for RtlSdr {
         Pin::new(&mut self.buffer_queue_reader)
             .poll_read_samples(cx, buffer)
             .map_err(|error| match error {})
+    }
+}
+
+// this could just return the buffers without the Result, because the buffer
+// queue doesn't return errors, but for future compatibility we will make it
+// return Results.
+impl Stream for RtlSdr {
+    type Item = Result<Buffer, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.buffer_queue_reader.receiver)
+            .poll_next(cx)
+            .map(|ready| ready.map(Ok))
     }
 }
 
@@ -1219,6 +1261,7 @@ mod buffer_queue {
             Deref,
             DerefMut,
         },
+        pin::Pin,
         sync::Arc,
         task::{
             Context,
@@ -1227,10 +1270,7 @@ mod buffer_queue {
         },
     };
 
-    use futures_util::{
-        Stream,
-        StreamExt,
-    };
+    use futures_core::Stream;
     use parking_lot::Mutex;
 
     use crate::{
@@ -1240,17 +1280,19 @@ mod buffer_queue {
 
     #[derive(Clone)]
     pub struct Buffer {
-        pub data: Arc<[IqSample]>,
-        pub filled: usize,
+        pub(crate) data: Arc<[IqSample]>,
+        pub(crate) filled: usize,
     }
 
     impl Buffer {
-        pub fn new(capacity: usize) -> Self {
+        pub(crate) fn new(capacity: usize) -> Self {
             let data = std::iter::repeat_n(IqSample::default(), capacity).collect();
             Self { data, filled: 0 }
         }
 
-        pub fn make_mut(&mut self, capacity: usize) -> &mut [IqSample] {
+        // note: this doesn't copy the buffer if we can't make it mut, but creates a new
+        // one
+        pub(crate) fn make_mut(&mut self, capacity: usize) -> &mut [IqSample] {
             if Arc::get_mut(&mut self.data).is_none() {
                 tracing::debug!("Buffer::make_mut: creating new buffer");
                 *self = Self::new(capacity);
@@ -1262,7 +1304,7 @@ mod buffer_queue {
 
     impl Debug for Buffer {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_tuple("Buffer").finish_non_exhaustive()
+            f.debug_list().entries(&**self).finish()
         }
     }
 
@@ -1406,7 +1448,7 @@ mod buffer_queue {
     #[derive(Clone, Debug)]
     pub struct Reader {
         /// receiver for the buffer broadcast queue.
-        receiver: Receiver,
+        pub receiver: Receiver,
 
         /// the buffer if we currently have one. this must be read first, before
         /// fetching a new one from the queue
@@ -1468,7 +1510,7 @@ mod buffer_queue {
                     assert_eq!(this.buffer_pos, 0);
                     assert!(this.buffer.is_none());
 
-                    match this.receiver.poll_next_unpin(cx) {
+                    match Pin::new(&mut this.receiver).poll_next(cx) {
                         Poll::Pending => {
                             if buffer_out_pos == 0 {
                                 return Poll::Pending;

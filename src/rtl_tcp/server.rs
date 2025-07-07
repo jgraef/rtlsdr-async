@@ -20,7 +20,7 @@ use crate::{
     Gain,
     RtlSdr,
     TunerGainMode,
-    tcp::{
+    rtl_tcp::{
         COMMAND_LENGTH,
         Command,
         DongleInfo,
@@ -29,23 +29,34 @@ use crate::{
     },
 };
 
+/// Server errors
 #[derive(Debug, thiserror::Error)]
 #[error("rtl_tcp server error")]
 pub enum Error {
     Io(#[from] std::io::Error),
+
+    /// Error from the underlying stream, e.g. the rtlsdr device, or another
+    /// `rtl_tcp`` client.
     Device(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
+/// A `rtl_tcp` server.
+///
+/// Different from the original `rtl_tcp` this accepts multiple connections at
+/// once.
+///
+/// It is usually created from a [`RtlSdr`], but be created from
+/// anything that implements the [`AsyncReadSamples`] and [`Configure`] traits,
+/// e.g. a [`RtlTcpClient`][crate::rtl_tcp::client::RtlTcpClient]
 #[derive(Debug)]
-pub struct RtlSdrServer<S> {
+pub struct RtlTcpServer<S> {
     stream: S,
     dongle_info: DongleInfo,
     tcp_listener: TcpListener,
     shutdown: CancellationToken,
-    //buffer: Vec<u8>,
 }
 
-impl<S> RtlSdrServer<S> {
+impl<S> RtlTcpServer<S> {
     pub fn new(stream: S, tcp_listener: TcpListener, dongle_info: DongleInfo) -> Self {
         Self {
             stream,
@@ -55,28 +66,37 @@ impl<S> RtlSdrServer<S> {
         }
     }
 
+    /// Provide a [`CancellationToken`] with which the server (and all client
+    /// connections) can be shut down.
     pub fn with_shutdown(mut self, shutdown: CancellationToken) -> Self {
         self.shutdown = shutdown;
         self
     }
 }
 
-impl RtlSdrServer<RtlSdr> {
+impl RtlTcpServer<RtlSdr> {
+    /// This will populate a [`DongleInfo`] and call [`RtlTcpServer::new`] with
+    /// it.
     pub fn from_rtl_sdr(rtl_sdr: RtlSdr, tcp_listener: TcpListener) -> Self {
         let dongle_info = DongleInfo {
             tuner_type: rtl_sdr.get_tuner_type(),
-            tuner_gain_type: 0, // todo
+            tuner_gain_count: rtl_sdr
+                .get_tuner_gains()
+                .len()
+                .try_into()
+                .expect("number of tuner gains doesn't fit into an u32"),
         };
         Self::new(rtl_sdr, tcp_listener, dongle_info)
     }
 }
 
-impl<S> RtlSdrServer<S>
+impl<S> RtlTcpServer<S>
 where
     S: Clone + AsyncReadSamples + Configure + Send + Unpin + 'static,
     <S as AsyncReadSamples>::Error: std::error::Error + Send + Sync + 'static,
     <S as Configure>::Error: std::error::Error + Send + Sync + 'static,
 {
+    /// Serve incoming connections
     pub async fn serve(self) -> Result<(), Error> {
         tracing::debug!("waiting for connections");
 
@@ -131,7 +151,7 @@ where
         let mut header_buffer = &mut write_buffer[..HEADER_LENGTH];
         header_buffer.put(&MAGIC[..]);
         header_buffer.put_u32(dongle_info.tuner_type.0);
-        header_buffer.put_u32(dongle_info.tuner_gain_type);
+        header_buffer.put_u32(dongle_info.tuner_gain_count);
     }
     tcp.write_all(&write_buffer[..HEADER_LENGTH]).await?;
     tcp.flush().await?;

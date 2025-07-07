@@ -1,10 +1,12 @@
+//! # Async bindings for [librtlsdr][1]
+//!
+//! This crate provides async bindings for the [librtlsdr][1] C library.
+//!
+//! [1]: https://gitea.osmocom.org/sdr/rtl-sdr
+
 mod bindings;
-#[cfg(feature = "command")]
-pub mod command;
-pub mod demodulator;
 #[cfg(feature = "tcp")]
-pub mod tcp;
-pub(crate) mod util;
+pub mod rtl_tcp;
 
 use std::{
     fmt::Debug,
@@ -18,6 +20,7 @@ use std::{
 pub use bindings::{
     DeviceInfo,
     DeviceIter,
+    Error,
     RtlSdr,
     devices,
 };
@@ -29,8 +32,11 @@ use pin_project_lite::pin_project;
 
 /// 16 bit IQ sample
 ///
-/// 8 bits per component, mapped from [-128, 127] to [0, 255]
-#[derive(Clone, Copy, Pod, Zeroable)]
+/// 8 bits per component, mapped from [-1, 1] to [0, 255]. K3XEC has [a good
+/// reference][1] on the format.
+///
+/// [1]: https://k3xec.com/packrat-processing-iq/
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 #[repr(C)]
 pub struct IqSample {
     /// I: in-phase / real component
@@ -45,51 +51,17 @@ impl Default for IqSample {
     }
 }
 
-impl IqSample {
-    pub fn magnitude(&self) -> u16 {
-        #[inline(always)]
-        fn abs(x: u8) -> u8 {
-            if x >= 127 { x - 127 } else { 127 - x }
-        }
-
-        #[inline(always)]
-        fn square(x: u8) -> u16 {
-            let x = u16::from(abs(x));
-            x * x
-        }
-
-        square(self.i) + square(self.q)
-    }
-}
-
-pub type Magnitude = u16;
-
-#[derive(Clone, Copy, Debug)]
-pub struct Cursor<'a> {
-    pub samples: &'a [Magnitude],
-    pub position: usize,
-}
-
-impl<'a> Cursor<'a> {
-    #[inline(always)]
-    pub fn advance(&mut self, amount: usize) {
-        self.position += amount;
-    }
-
-    #[inline(always)]
-    pub fn advance_to_end(&mut self) {
-        self.position = self.samples.len();
-    }
-
-    #[inline(always)]
-    pub fn remaining(&self) -> &[Magnitude] {
-        &self.samples[self.position..]
-    }
-}
-
+/// Trait for async reading of samples.
+///
+/// This works pretty much like futures [`AsyncRead`][1],
+/// except it works with 16 bit [`IqSample`]s instead of single bytes.
+///
+/// [1]: https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html
 pub trait AsyncReadSamples {
+    /// Error that might occur when reading the IQ stream.
     type Error;
 
+    /// Poll the stream to fill a buffer with IQ samples.
     fn poll_read_samples(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -109,7 +81,13 @@ impl<T: ?Sized + AsyncReadSamples + Unpin> AsyncReadSamples for &mut T {
     }
 }
 
+/// Extension trait for [`AsyncReadSamples`] with some useful methods.
 pub trait AsyncReadSamplesExt: AsyncReadSamples {
+    /// Read IQ samples into a buffer.
+    ///
+    /// This will call
+    /// [`poll_read_samples`][AsyncReadSamples::poll_read_samples] exactly once,
+    /// and return the number of bytes read. This is cancellation-safe.
     fn read_samples<'a>(&'a mut self, buffer: &'a mut [IqSample]) -> ReadSamples<'a, Self>
     where
         Self: Unpin,
@@ -120,6 +98,27 @@ pub trait AsyncReadSamplesExt: AsyncReadSamples {
         }
     }
 
+    /// Read IQ samples into a buffer until the buffer is full.
+    ///
+    /// This might call
+    /// [`poll_read_samples`][AsyncReadSamples::poll_read_samples] multiple
+    /// times, and thus is not cancellation-safe.
+    fn read_samples_exact<'a>(
+        &'a mut self,
+        buffer: &'a mut [IqSample],
+    ) -> ReadSamplesExact<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadSamplesExact {
+            stream: self,
+            buffer,
+            filled: 0,
+        }
+    }
+
+    /// Maps any errors returned by the underlying stream with the provided
+    /// closure.
     fn map_err<E, F>(self, f: F) -> MapErr<Self, F>
     where
         F: FnMut(Self::Error) -> E,
@@ -134,6 +133,7 @@ pub trait AsyncReadSamplesExt: AsyncReadSamples {
 
 impl<T: AsyncReadSamples> AsyncReadSamplesExt for T {}
 
+/// Future that reads samples into a buffer.
 pub struct ReadSamples<'a, S: ?Sized> {
     stream: &'a mut S,
     buffer: &'a mut [IqSample],
@@ -148,7 +148,63 @@ impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamples<'a, S>
     }
 }
 
+/// Future that tries to read an exact amount of samples.
+#[derive(Debug)]
+pub struct ReadSamplesExact<'a, S: ?Sized> {
+    stream: &'a mut S,
+    buffer: &'a mut [IqSample],
+    filled: usize,
+}
+
+impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamplesExact<'a, S> {
+    type Output = Result<(), ReadSamplesExactError<S::Error>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        while self.filled < self.buffer.len() {
+            let this = &mut *self;
+            match Pin::new(&mut *this.stream).poll_read_samples(cx, &mut this.buffer[this.filled..])
+            {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => {
+                    return Poll::Ready(Err(ReadSamplesExactError::Other(error)));
+                }
+                Poll::Ready(Ok(num_samples_read)) => {
+                    if num_samples_read == 0 {
+                        break;
+                    }
+                    else {
+                        this.filled += num_samples_read;
+                    }
+                }
+            }
+        }
+
+        if self.filled == self.buffer.len() {
+            Poll::Ready(Ok(()))
+        }
+        else {
+            Poll::Ready(Err(ReadSamplesExactError::Eof {
+                num_bytes_read: self.filled,
+            }))
+        }
+    }
+}
+
+/// Error returned by
+/// [`read_samples_exact`][AsyncReadSamplesExt::read_samples_exact]
+#[derive(Clone, Copy, thiserror::Error)]
+pub enum ReadSamplesExactError<E> {
+    /// The stream ended before the buffer could be filled completely.
+    #[error("EOF after {num_bytes_read} bytes")]
+    Eof { num_bytes_read: usize },
+
+    /// The underlying stream produced an error.
+    #[error("{0}")]
+    Other(#[from] E),
+}
+
 pin_project! {
+    /// Stream wrapper that maps the error type.
     #[derive(Clone, Copy, Debug)]
     pub struct MapErr<S, F> {
         #[pin]
@@ -175,6 +231,11 @@ where
     }
 }
 
+/// Trait for IQ streams that accept configuration options.
+///
+/// This is basically all the methods shared by
+/// [`RtlTcpClient`][crate::rtl_tcp::client::RtlTcpClient], and [`RtlSdr`], so
+/// that they can be used interchangeably.
 pub trait Configure {
     type Error;
 
@@ -293,27 +354,41 @@ impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
     }
 }
 
+/// Tuner gain
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gain {
     /// Gain tenths of a dB
     ManualValue(i32),
+    /// Tuner gain index specific to the tuner.
+    ///
+    /// Tuner gain values can be queries with [`RtlSdr::get_tuner_gains`].
     ManualIndex(usize),
     /// Auto gain control
     Auto,
 }
 
+/// Tuner gain mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TunerGainMode {
+    /// Tuner gain is set manually
     Manual,
+    /// Tuner gain is set automatically by the tuner.
     Auto,
 }
 
+/// Direct sampling mode
+///
+/// Direct sampling is not yet supported by [`RtlSdr`], but it can be used with
+/// [`rtl_tcp`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DirectSamplingMode {
+    /// Direct sampling of I branch
     I,
+    /// Direct sampling of Q branch
     Q,
 }
 
+/// The type of tuner in a [`RtlSdr`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TunerType(pub u32);
 
