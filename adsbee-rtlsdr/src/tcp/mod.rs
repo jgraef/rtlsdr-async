@@ -18,7 +18,7 @@ pub enum Command {
     SetCenterFrequency { frequency: u32 },
     SetSampleRate { sample_rate: u32 },
     SetTunerGainMode { mode: TunerGainMode },
-    SetTunerGainLevel { gain: i32 },
+    SetTunerGain { gain: i32 },
     SetFrequencyCorrection { ppm: i32 },
     SetTunerIfGain { stage: i16, gain: i16 },
     SetTestMode { enable: bool },
@@ -27,7 +27,7 @@ pub enum Command {
     SetOffsetTuning { enable: bool },
     SetRtlXtal { frequency: u32 },
     SetTunerXtal { frequency: u32 },
-    SetTunerGainLevelIndex { index: u32 },
+    SetTunerGainIndex { index: u32 },
     SetBiasT { enable: bool },
 }
 
@@ -55,7 +55,7 @@ impl Command {
                 })
             }
             0x04 => {
-                Ok(Self::SetTunerGainLevel {
+                Ok(Self::SetTunerGain {
                     gain: buffer.get_i32(),
                 })
             }
@@ -105,7 +105,7 @@ impl Command {
                 })
             }
             0x0d => {
-                Ok(Self::SetTunerGainLevelIndex {
+                Ok(Self::SetTunerGainIndex {
                     index: buffer.get_u32(),
                 })
             }
@@ -140,7 +140,7 @@ impl Command {
                     TunerGainMode::Manual => 1,
                 });
             }
-            Self::SetTunerGainLevel { gain } => {
+            Self::SetTunerGain { gain } => {
                 buffer.put_u8(0x04);
                 buffer.put_i32(*gain);
             }
@@ -181,7 +181,7 @@ impl Command {
                 buffer.put_u8(0x0c);
                 buffer.put_u32(*frequency);
             }
-            Self::SetTunerGainLevelIndex { index } => {
+            Self::SetTunerGainIndex { index } => {
                 buffer.put_u8(0x0d);
                 buffer.put_u32(*index);
             }

@@ -4,10 +4,6 @@ use std::{
         c_void,
     },
     fmt::Debug,
-    ops::{
-        Deref,
-        DerefMut,
-    },
     pin::Pin,
     ptr::null_mut,
     sync::{
@@ -38,11 +34,20 @@ use crate::{
     Configure,
     Gain,
     IqSample,
+    TunerGainMode,
     TunerType,
 };
 
+/// default buffer size is 16 KiB
+///
+/// at 2.4 Mhz sample rate this is equivalent to ~ 6.8 ms of samples
 const DEFAULT_BUFFER_SIZE: usize = 0x4000; // 16 KiB
-const DEFAULT_QUEUE_SIZE: usize = 64; // total of 1 MiB buffers
+
+/// default queue size
+///
+/// together with `DEFAULT_BUFFER_SIZE` this makes a total of 1 MiB of buffers,
+/// or ~436 ms of samples.
+const DEFAULT_QUEUE_SIZE: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -58,6 +63,8 @@ pub enum Error {
     UnknownTuner,
     #[error("operation not supported")]
     Unsupported,
+    #[error("invalid gain index: {index}")]
+    InvalidGainIndex { index: usize },
 }
 
 impl Error {
@@ -207,13 +214,22 @@ impl UsbString {
 struct Handle {
     handle: rtlsdr_sys::rtlsdr_dev_t,
 
-    // the mutex is separate because it's only used to synchronize control operations (everything
-    // that isn't a read).
-    control_lock: Mutex<()>,
+    // holds some state we want to maintain for this handle. but this should always be used when
+    // interacting with the handle (except for reads). this specifically doesn't include the
+    // handle itself, because we want to do reads with it concurrently with other control commands.
+    state: Mutex<HandleState>,
 
     tuner_type: TunerType,
 
     tuner_gains: TunerGains,
+}
+
+#[derive(Debug)]
+struct HandleState {
+    /// the tuner gain mode we set previously. we store this so we can skip
+    /// setting it if we would set it to the same mode gain. librtlsdr doesn't
+    /// do this check. initially we don't know the mode, so this is an Option.
+    tuner_gain_mode: Option<TunerGainMode>,
 }
 
 unsafe impl Send for Handle {}
@@ -266,14 +282,16 @@ impl Handle {
 
         Ok(Handle {
             handle,
-            control_lock: Mutex::new(()),
+            state: Mutex::new(HandleState {
+                tuner_gain_mode: None,
+            }),
             tuner_type,
             tuner_gains,
         })
     }
 
     fn get_center_frequency(&self) -> Result<u32, Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_get_center_freq(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_center_freq");
         if ret == 0 {
@@ -285,7 +303,7 @@ impl Handle {
     }
 
     fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_center_freq(self.handle, frequency) };
         tracing::debug!(ret, frequency, "rtlsdr_set_center_freq");
         if ret == 0 {
@@ -297,7 +315,7 @@ impl Handle {
     }
 
     fn get_sample_rate(&self) -> Result<u32, Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_get_sample_rate(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_sample_rate");
         if ret == 0 {
@@ -309,7 +327,7 @@ impl Handle {
     }
 
     fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_sample_rate(self.handle, sample_rate) };
         tracing::debug!(ret, sample_rate, "rtlsdr_set_sample_rate");
         if ret == 0 {
@@ -320,11 +338,29 @@ impl Handle {
         }
     }
 
-    fn set_tuner_gain_mode(&self, manual: bool) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_gain_mode(self.handle, manual as i32) };
-        tracing::debug!(ret, ?manual, "rtlsdr_set_tuner_gain_mode");
+    fn set_tuner_gain_mode(&self, mode: TunerGainMode) -> Result<(), Error> {
+        let mut state = self.state.lock();
+
+        // if the mode is already set, don't set it again
+        if state
+            .tuner_gain_mode
+            .map_or(false, |current| current == mode)
+        {
+            return Ok(());
+        }
+
+        let ret = unsafe {
+            rtlsdr_sys::rtlsdr_set_tuner_gain_mode(
+                self.handle,
+                match mode {
+                    TunerGainMode::Manual => 1,
+                    TunerGainMode::Auto => 0,
+                },
+            )
+        };
+        tracing::debug!(ret, ?mode, "rtlsdr_set_tuner_gain_mode");
         if ret == 0 {
+            state.tuner_gain_mode = Some(mode);
             Ok(())
         }
         else {
@@ -333,7 +369,7 @@ impl Handle {
     }
 
     fn get_tuner_gain(&self) -> Result<i32, Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_get_tuner_gain(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_tuner_gain");
         // note: looking at the librtlsdr source it looks like that 0 is also a valid
@@ -349,7 +385,7 @@ impl Handle {
     }
 
     fn set_tuner_gain(&self, gain: i32) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_gain(self.handle, gain) };
         tracing::debug!(ret, gain, "rtlsdr_set_tuner_gain");
         if ret == 0 {
@@ -361,7 +397,7 @@ impl Handle {
     }
 
     fn set_tuner_if_gain(&self, stage: i32, gain: i32) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_if_gain(self.handle, stage, gain) };
         tracing::debug!(ret, gain, "rtlsdr_set_tuner_if_gain");
         if ret == 0 {
@@ -373,7 +409,7 @@ impl Handle {
     }
 
     fn set_tuner_bandwidth(&self, bandwidth: u32) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_bandwidth(self.handle, bandwidth) };
         tracing::debug!(ret, bandwidth, "rtlsdr_set_tuner_bandwidth");
         if ret == 0 {
@@ -385,7 +421,7 @@ impl Handle {
     }
 
     fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_agc_mode(self.handle, enable as i32) };
         tracing::debug!(ret, ?enable, "rtlsdr_set_agc_mode");
         if ret == 0 {
@@ -397,7 +433,7 @@ impl Handle {
     }
 
     fn get_frequency_correction(&self) -> Result<i32, Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_get_freq_correction(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_freq_correction");
         // note: only returns errors for dev=null, and besides 0 is a valid return value
@@ -405,7 +441,7 @@ impl Handle {
     }
 
     fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_freq_correction(self.handle, ppm) };
         tracing::debug!(ret, ?ppm, "rtlsdr_set_freq_correction");
         // -2 means that this value is already set, so not really an error
@@ -418,7 +454,7 @@ impl Handle {
     }
 
     fn get_offset_tuning(&self) -> Result<bool, Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_get_offset_tuning(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_offset_tuning");
         // note: only returns errors for dev=null
@@ -449,7 +485,7 @@ impl Handle {
             return Err(Error::Unsupported);
         }
 
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe { rtlsdr_sys::rtlsdr_set_offset_tuning(self.handle, enable as i32) };
         tracing::debug!(ret, ?enable, "rtlsdr_set_offset_tuning");
         if ret == 0 {
@@ -461,7 +497,7 @@ impl Handle {
     }
 
     fn get_xtal_frequency(&self) -> Result<(u32, u32), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let mut rtl_frequency = 0;
         let mut tuner_frequency = 0;
         let ret = unsafe {
@@ -483,7 +519,7 @@ impl Handle {
     }
 
     fn set_xtal_frequency(&self, rtl_frequency: u32, tuner_frequency: u32) -> Result<(), Error> {
-        let _guard = self.control_lock.lock();
+        let _guard = self.state.lock();
         let ret = unsafe {
             rtlsdr_sys::rtlsdr_set_xtal_freq(self.handle, rtl_frequency, tuner_frequency)
         };
@@ -520,7 +556,9 @@ impl Handle {
         Ok(())
     }
 
-    // not synchronized! this must only be used in the reader_thread
+    /// not synchronized! this must only be used in the reader_thread
+    ///
+    /// a quick test showed that this usually fills the whole buffer.
     fn read_sync(&self, buffer: &mut [u8]) -> Result<usize, Error> {
         let mut n_read: i32 = 0;
 
@@ -603,15 +641,7 @@ pub struct RtlSdr {
     /// sender to send commands to control thread for slow control commands
     control_queue_sender: mpsc::Sender<ControlMessage>,
 
-    /// reader for the buffer broadcast queue.
     buffer_queue_reader: buffer_queue::Reader,
-
-    /// the buffer if we currently have one. this must be read first, before
-    /// fetching a new one from the queue
-    buffer: Option<Buffer>,
-
-    // read position in buffer
-    buffer_pos: usize,
 }
 
 impl RtlSdr {
@@ -619,6 +649,9 @@ impl RtlSdr {
         Self::open_impl(index, DEFAULT_QUEUE_SIZE, DEFAULT_BUFFER_SIZE)
     }
 
+    /// `buffer_size` must be somewhat carefully chosen. from the librtlsdr doc
+    /// it seems like it must be at least a multiple of 512, and should really
+    /// be a multiple of 16KiB
     fn open_impl(index: u32, queue_size: usize, buffer_size: usize) -> Result<Self, Error> {
         let handle = Arc::new(Handle::open(index)?);
 
@@ -627,22 +660,19 @@ impl RtlSdr {
 
         let control_queue_sender = get_control_queue_sender();
 
-        let (buffer_queue_writer, buffer_queue_reader) =
-            buffer_queue::channel(queue_size, buffer_size);
+        let (buffer_queue_sender, buffer_queue_receiver) = buffer_queue::channel(queue_size);
 
         thread::spawn({
             let handle = handle.clone();
             move || {
-                reader_thread(buffer_queue_writer, handle);
+                reader_thread(buffer_queue_sender, handle, buffer_size);
             }
         });
 
         Ok(Self {
             handle,
             control_queue_sender,
-            buffer_queue_reader,
-            buffer: None,
-            buffer_pos: 0,
+            buffer_queue_reader: buffer_queue_receiver.into(),
         })
     }
 
@@ -858,46 +888,9 @@ impl AsyncReadSamples for RtlSdr {
         cx: &mut Context<'_>,
         buffer: &mut [IqSample],
     ) -> Poll<Result<usize, Self::Error>> {
-        let buffer_out = buffer;
-
-        loop {
-            let this = self.deref_mut();
-
-            if let Some(buffer_in) = &this.buffer {
-                assert!(this.buffer_pos < buffer_in.len());
-
-                if buffer_out.is_empty() {
-                    return Poll::Ready(Ok(0));
-                }
-
-                let copy_amount = buffer_out.len().min(buffer_in.len() - this.buffer_pos);
-
-                buffer_out[..copy_amount]
-                    .copy_from_slice(&buffer_in[this.buffer_pos..][..copy_amount]);
-                this.buffer_pos += copy_amount;
-
-                if this.buffer_pos == buffer_in.len() {
-                    this.buffer_pos = 0;
-                    this.buffer = None;
-                }
-
-                return Poll::Ready(Ok(copy_amount));
-            }
-            else {
-                assert_eq!(this.buffer_pos, 0);
-                assert!(this.buffer.is_none());
-
-                match this.buffer_queue_reader.poll_next(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(None) => {
-                        return Poll::Ready(Ok(0));
-                    }
-                    Poll::Ready(Some(buffer)) => {
-                        this.buffer = Some(buffer);
-                    }
-                }
-            }
-        }
+        Pin::new(&mut self.buffer_queue_reader)
+            .poll_read_samples(cx, buffer)
+            .map_err(|error| match error {})
     }
 }
 
@@ -954,27 +947,31 @@ impl Configure for RtlSdr {
 fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
     fn set_tuner_gain(handle: &Handle, gain: Gain) -> Result<(), Error> {
         match gain {
-            Gain::Manual(gain) => {
+            Gain::ManualValue(gain) => {
                 // manual gain mode must be enabled
-                handle.set_tuner_gain_mode(true)?;
+                handle.set_tuner_gain_mode(TunerGainMode::Manual)?;
 
                 // we need to find a supported gain value
-                if let Some(gain) = handle
+                let gain = handle
                     .tuner_gains
                     .iter()
                     .min_by_key(|supported| (**supported - gain).abs())
-                {
-                    handle.set_tuner_gain(*gain)?;
-                    Ok(())
-                }
-                else {
-                    Err(Error::NoSupportedGains)
-                }
+                    .ok_or(Error::NoSupportedGains)?;
+                handle.set_tuner_gain(*gain)
             }
-            Gain::Auto => {
-                handle.set_tuner_gain_mode(false)?;
-                Ok(())
+            Gain::ManualIndex(index) => {
+                // manual gain mode must be enabled
+                handle.set_tuner_gain_mode(TunerGainMode::Manual)?;
+
+                // we need to find a supported gain value
+                let gain = handle
+                    .tuner_gains
+                    .as_ref()
+                    .get(index)
+                    .ok_or(Error::InvalidGainIndex { index })?;
+                handle.set_tuner_gain(*gain)
             }
+            Gain::Auto => handle.set_tuner_gain_mode(TunerGainMode::Auto),
         }
     }
 
@@ -1077,6 +1074,8 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
             }
         }
     }
+
+    tracing::warn!("control thread terminating");
 }
 
 /// returns a sender to send commands to the control handler thread.
@@ -1155,7 +1154,11 @@ enum ControlMessage {
     },
 }
 
-fn reader_thread(mut buffer_queue_writer: buffer_queue::Writer, handle: Arc<Handle>) {
+fn reader_thread(
+    mut buffer_queue_sender: buffer_queue::Sender,
+    handle: Arc<Handle>,
+    buffer_size: usize,
+) {
     // when we are reading to the buffer we don't hold the queue lock, so once we're
     // done we need to acquire the lock to add the buffer to the queue.
     // but we also need the queue lock to get a new free buffer. we can combine both
@@ -1165,8 +1168,8 @@ fn reader_thread(mut buffer_queue_writer: buffer_queue::Writer, handle: Arc<Hand
 
     tracing::debug!("reader thread spawned");
 
-    'outer: loop {
-        let Some(mut buffer) = buffer_queue_writer.swap_buffers(push_buffer)
+    loop {
+        let Some(mut buffer) = buffer_queue_sender.swap_buffers(push_buffer, buffer_size)
         else {
             // all readers dropped
             tracing::debug!("all readers dropped. exiting reader thread");
@@ -1175,62 +1178,47 @@ fn reader_thread(mut buffer_queue_writer: buffer_queue::Writer, handle: Arc<Hand
 
         // this will clone, i.e. make a new buffer, if we can't get unique ownership of
         // it.
-        let buffer_mut = Arc::make_mut(&mut buffer.data);
+        let buffer_mut = buffer.make_mut(buffer_size);
+        //let buffer_mut = Arc::make_mut(&mut buffer.data);
         let buffer_mut = bytemuck::cast_slice_mut(buffer_mut);
 
-        loop {
-            match handle.read_sync(buffer_mut) {
-                Ok(n_read) => {
-                    if n_read > 0 {
-                        assert!(n_read & 1 == 0, "not an even amount of bytes :sobbing:");
-                        buffer.filled = n_read >> 1;
-                        push_buffer = Some(buffer);
-                        break;
-                    }
-                    else {
-                        tracing::debug!("rtlsdr_read_sync returned 0. exiting");
-                        break 'outer;
-                    }
+        // note: we could call read_sync multiple times if one call doesn't fill the
+        // buffer, but testing shows that it usually fills the buffer.
+        // not sure how it will behave with larger buffer sizes, but you should then
+        // probably choose a better buffer size lol
+        match handle.read_sync(buffer_mut) {
+            Ok(n_read) => {
+                if n_read > 0 {
+                    assert!(
+                        n_read & 1 == 0,
+                        "not an even amount of bytes ({}) :sobbing: open an issue and i will fix this, but i thought this would never happen",
+                        n_read
+                    );
+                    buffer.filled = n_read >> 1;
+                    push_buffer = Some(buffer);
                 }
-                Err(error) => {
-                    tracing::error!(?error, "rtlsdr reader thread error");
-                    break 'outer;
+                else {
+                    tracing::debug!("rtlsdr_read_sync returned 0. exiting");
+                    break;
                 }
             }
+            Err(error) => {
+                tracing::error!(?error, "rtlsdr reader thread error");
+                break;
+            }
         }
-    }
-}
-
-#[derive(Clone)]
-struct Buffer {
-    data: Arc<[IqSample]>,
-    filled: usize,
-}
-
-impl Buffer {
-    pub fn new(capacity: usize) -> Self {
-        let data = std::iter::repeat_n(IqSample::default(), capacity).collect();
-        Self { data, filled: 0 }
-    }
-}
-
-impl Debug for Buffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Buffer").finish_non_exhaustive()
-    }
-}
-
-impl Deref for Buffer {
-    type Target = [IqSample];
-
-    fn deref(&self) -> &Self::Target {
-        &self.data[..self.filled]
     }
 }
 
 mod buffer_queue {
     use std::{
         collections::VecDeque,
+        convert::Infallible,
+        fmt::Debug,
+        ops::{
+            Deref,
+            DerefMut,
+        },
         sync::Arc,
         task::{
             Context,
@@ -1239,9 +1227,52 @@ mod buffer_queue {
         },
     };
 
+    use futures_util::{
+        Stream,
+        StreamExt,
+    };
     use parking_lot::Mutex;
 
-    use crate::bindings::Buffer;
+    use crate::{
+        AsyncReadSamples,
+        IqSample,
+    };
+
+    #[derive(Clone)]
+    pub struct Buffer {
+        pub data: Arc<[IqSample]>,
+        pub filled: usize,
+    }
+
+    impl Buffer {
+        pub fn new(capacity: usize) -> Self {
+            let data = std::iter::repeat_n(IqSample::default(), capacity).collect();
+            Self { data, filled: 0 }
+        }
+
+        pub fn make_mut(&mut self, capacity: usize) -> &mut [IqSample] {
+            if Arc::get_mut(&mut self.data).is_none() {
+                tracing::debug!("Buffer::make_mut: creating new buffer");
+                *self = Self::new(capacity);
+            }
+
+            Arc::get_mut(&mut self.data).expect("Arc::get_mut failed")
+        }
+    }
+
+    impl Debug for Buffer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_tuple("Buffer").finish_non_exhaustive()
+        }
+    }
+
+    impl Deref for Buffer {
+        type Target = [IqSample];
+
+        fn deref(&self) -> &Self::Target {
+            &self.data[..self.filled]
+        }
+    }
 
     /// This is the central queue that passes buffers from the reader thread
     /// (producer) to the AsyncReadSamples impl (consumer).
@@ -1250,12 +1281,26 @@ mod buffer_queue {
     /// tail. Consumers have a read_pos that is relative to that numbering,
     /// so they'll know if they're lagging behind.
     struct Shared {
-        num_writers: usize,
-        num_readers: usize,
+        /// number of senders. this is either 1 or 0 currently.
+        num_senders: usize,
+
+        /// number of receivers
+        num_receivers: usize,
+
+        /// in-flight buffers
         slots: VecDeque<Buffer>,
+
+        /// position where new buffers are appended
         tail_pos: usize,
+
+        /// position of the oldest buffer. this corresponds to index 0 in
+        /// `slots`
         head_pos: usize,
+
+        /// total capacity for `slots`
         capacity: usize,
+
+        /// wakers of receivers that are waiting for new buffers
         wakers: Vec<Waker>,
     }
 
@@ -1288,17 +1333,17 @@ mod buffer_queue {
     }
 
     #[derive(derive_more::Debug)]
-    pub struct Reader {
+    pub struct Receiver {
         #[debug(skip)]
         shared: Arc<Mutex<Shared>>,
         read_pos: usize,
     }
 
-    impl Clone for Reader {
+    impl Clone for Receiver {
         fn clone(&self) -> Self {
             {
                 let mut queue = self.shared.lock();
-                queue.num_readers += 1;
+                queue.num_receivers += 1;
             }
 
             Self {
@@ -1308,63 +1353,169 @@ mod buffer_queue {
         }
     }
 
-    impl Drop for Reader {
+    impl Drop for Receiver {
         fn drop(&mut self) {
             let mut queue = self.shared.lock();
-            queue.num_readers -= 1;
+            queue.num_receivers -= 1;
         }
     }
 
-    impl Reader {
-        pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Buffer>> {
-            let mut queue = self.shared.lock();
+    impl Stream for Receiver {
+        type Item = Buffer;
 
-            if queue.num_writers == 0 {
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            let this = self.deref_mut();
+
+            let mut queue = this.shared.lock();
+
+            // determine index into the VecDeque
+            let queue_index = if this.read_pos < queue.head_pos {
+                // we're behind, update our read_pos to the current head
+                tracing::debug!(?this.read_pos, ?queue.head_pos, ?queue.tail_pos, "lagging behind by {} chunks", queue.head_pos - this.read_pos);
+                this.read_pos = queue.head_pos;
+                0
+            }
+            else {
+                this.read_pos - queue.head_pos
+            };
+
+            if this.read_pos < queue.tail_pos {
+                // there are buffers we can read
+                let buffer = queue.slots[queue_index].clone();
+                this.read_pos += 1;
+                Poll::Ready(Some(buffer))
+            }
+            else if queue.num_senders == 0 {
+                // there are no buffers left for us to read, and there are no writers left, so
+                // we yield None
                 Poll::Ready(None)
             }
             else {
-                let queue_index = if self.read_pos < queue.head_pos {
-                    self.read_pos = queue.head_pos;
-                    0
-                }
-                else {
-                    self.read_pos - queue.head_pos
-                };
+                // there are no buffers left for us to read, but there are still writers, so we
+                // need to wait.
+                queue.wakers.push(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
 
-                if self.read_pos < queue.tail_pos {
-                    self.read_pos += 1;
-                    Poll::Ready(Some(queue.slots[queue_index].clone()))
+    /// Wraps a [`Reader`] and provides an [`AsyncReadSamples`] interface.
+    #[derive(Clone, Debug)]
+    pub struct Reader {
+        /// receiver for the buffer broadcast queue.
+        receiver: Receiver,
+
+        /// the buffer if we currently have one. this must be read first, before
+        /// fetching a new one from the queue
+        buffer: Option<Buffer>,
+
+        // read position in buffer
+        buffer_pos: usize,
+    }
+
+    impl From<Receiver> for Reader {
+        fn from(value: Receiver) -> Self {
+            Self {
+                receiver: value,
+                buffer: None,
+                buffer_pos: 0,
+            }
+        }
+    }
+
+    impl AsyncReadSamples for Reader {
+        type Error = Infallible;
+
+        fn poll_read_samples(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &mut [crate::IqSample],
+        ) -> Poll<Result<usize, Self::Error>> {
+            let buffer_out = buffer;
+            let mut buffer_out_pos = 0;
+
+            loop {
+                let this = self.deref_mut();
+
+                if let Some(buffer_in) = &this.buffer {
+                    assert!(this.buffer_pos < buffer_in.len());
+
+                    if buffer_out.is_empty() {
+                        return Poll::Ready(Ok(0));
+                    }
+
+                    let copy_amount =
+                        (buffer_out.len() - buffer_out_pos).min(buffer_in.len() - this.buffer_pos);
+
+                    buffer_out[buffer_out_pos..][..copy_amount]
+                        .copy_from_slice(&buffer_in[this.buffer_pos..][..copy_amount]);
+                    this.buffer_pos += copy_amount;
+                    buffer_out_pos += copy_amount;
+
+                    if this.buffer_pos == buffer_in.len() {
+                        this.buffer_pos = 0;
+                        this.buffer = None;
+                    }
+
+                    if buffer_out_pos == buffer_out.len() {
+                        break;
+                    }
                 }
                 else {
-                    queue.wakers.push(cx.waker().clone());
-                    Poll::Pending
+                    assert_eq!(this.buffer_pos, 0);
+                    assert!(this.buffer.is_none());
+
+                    match this.receiver.poll_next_unpin(cx) {
+                        Poll::Pending => {
+                            if buffer_out_pos == 0 {
+                                return Poll::Pending;
+                            }
+                            else {
+                                break;
+                            }
+                        }
+                        Poll::Ready(None) => {
+                            return Poll::Ready(Ok(buffer_out_pos));
+                        }
+                        Poll::Ready(Some(buffer)) => {
+                            this.buffer = Some(buffer);
+                        }
+                    }
                 }
             }
+
+            Poll::Ready(Ok(buffer_out_pos))
         }
     }
 
     #[derive(derive_more::Debug)]
-    pub struct Writer {
+    pub struct Sender {
         #[debug(skip)]
         shared: Arc<Mutex<Shared>>,
-        buffer_size: usize,
     }
 
-    impl Drop for Writer {
+    impl Drop for Sender {
         fn drop(&mut self) {
             let mut queue = self.shared.lock();
-            queue.num_writers -= 1;
+            queue.num_senders -= 1;
         }
     }
 
-    impl Writer {
+    impl Sender {
         /// Returns a buffer to be filled with data. You can also pass in a
         /// buffer that you just filled. Returns None if all readers
         /// dropped.
-        pub fn swap_buffers(&mut self, push_buffer: Option<Buffer>) -> Option<Buffer> {
+        pub fn swap_buffers(
+            &mut self,
+            push_buffer: Option<Buffer>,
+            buffer_size: usize,
+        ) -> Option<Buffer> {
             let mut queue = self.shared.lock();
 
-            if queue.num_readers == 0 {
+            if queue.num_receivers == 0 {
                 None
             }
             else {
@@ -1376,20 +1527,19 @@ mod buffer_queue {
                 // get a free buffer from the queue, or make a new one
                 let buffer = queue
                     .pop_buffer()
-                    .unwrap_or_else(|| Buffer::new(self.buffer_size));
+                    .unwrap_or_else(|| Buffer::new(buffer_size));
 
                 Some(buffer)
             }
         }
     }
 
-    pub fn channel(num_buffers: usize, buffer_size: usize) -> (Writer, Reader) {
+    pub fn channel(num_buffers: usize) -> (Sender, Receiver) {
         assert!(num_buffers > 0);
-        assert!(buffer_size > 0);
 
         let shared = Arc::new(Mutex::new(Shared {
-            num_readers: 1,
-            num_writers: 1,
+            num_receivers: 1,
+            num_senders: 1,
             slots: VecDeque::with_capacity(num_buffers),
             tail_pos: 0,
             head_pos: 0,
@@ -1398,11 +1548,10 @@ mod buffer_queue {
         }));
 
         (
-            Writer {
+            Sender {
                 shared: shared.clone(),
-                buffer_size,
             },
-            Reader {
+            Receiver {
                 shared,
                 read_pos: 0,
             },

@@ -130,13 +130,25 @@ impl Configure for RtlTcpClient {
 
     async fn set_tuner_gain(&mut self, gain: Gain) -> Result<(), Error> {
         match gain {
-            Gain::Manual(gain) => {
+            Gain::ManualValue(gain) => {
                 self.send_command(Command::SetTunerGainMode {
                     mode: TunerGainMode::Manual,
                 })
                 .await?;
-                self.send_command(Command::SetTunerGainLevel { gain })
+                self.send_command(Command::SetTunerGain { gain }).await?;
+            }
+            Gain::ManualIndex(index) => {
+                if let Ok(index) = index.try_into() {
+                    self.send_command(Command::SetTunerGainMode {
+                        mode: TunerGainMode::Manual,
+                    })
                     .await?;
+                    self.send_command(Command::SetTunerGainIndex { index })
+                        .await?;
+                }
+                else {
+                    tracing::error!(?index, "gain index doesn't fit into an u32!");
+                }
             }
             Gain::Auto => {
                 self.send_command(Command::SetTunerGainMode {

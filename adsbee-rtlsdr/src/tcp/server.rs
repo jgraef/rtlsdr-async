@@ -172,7 +172,7 @@ where
                     break;
                 }
 
-                // note: we could put this write into the select, so that we can accept commands while writing out a chunk of samples
+                // todo: we could put this write into the select, so that we can accept commands while writing out a chunk of samples
                 tcp_write.write_all(&write_buffer[0..samples_read * 2]).await?;
                 tcp_write.flush().await?;
             }
@@ -187,6 +187,7 @@ where
     S: Configure + Unpin,
     <S as Configure>::Error: std::error::Error + Send + Sync + 'static,
 {
+    tracing::debug!(?command);
     match command {
         Command::SetCenterFrequency { frequency } => {
             stream
@@ -212,9 +213,9 @@ where
                 // the mode to manual automatically
             }
         }
-        Command::SetTunerGainLevel { gain } => {
+        Command::SetTunerGain { gain } => {
             stream
-                .set_tuner_gain(Gain::Manual(gain))
+                .set_tuner_gain(Gain::ManualValue(gain))
                 .await
                 .map_err(|error| Error::Device(Box::new(error)))?;
         }
@@ -260,9 +261,16 @@ where
                 .await
                 .map_err(|error| Error::Device(Box::new(error)))?;
         }
-        Command::SetTunerGainLevelIndex { index: _ } => {
-            // todo: we can obviously support it, but it's kind of
-            // awkward with the interface we have. open to suggestions
+        Command::SetTunerGainIndex { index } => {
+            if let Ok(index) = index.try_into() {
+                stream
+                    .set_tuner_gain(Gain::ManualIndex(index))
+                    .await
+                    .map_err(|error| Error::Device(Box::new(error)))?;
+            }
+            else {
+                tracing::error!(?index, "gain index doesn't fit into an usize!");
+            }
         }
         Command::SetBiasT { enable } => {
             stream

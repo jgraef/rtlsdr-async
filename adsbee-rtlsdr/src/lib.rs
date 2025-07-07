@@ -265,7 +265,7 @@ impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
         &mut self,
         ppm: i32,
     ) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_frequency_correction(self, ppm)
+        T::set_frequency_correction(*self, ppm)
     }
 
     fn set_tuner_if_gain(
@@ -273,30 +273,31 @@ impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
         stage: i16,
         gain: i16,
     ) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_tuner_if_gain(self, stage, gain)
+        T::set_tuner_if_gain(*self, stage, gain)
     }
 
     fn set_offset_tuning(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_offset_tuning(self, enable)
+        T::set_offset_tuning(*self, enable)
     }
 
     fn set_rtl_xtal(&mut self, frequency: u32) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_rtl_xtal(self, frequency)
+        T::set_rtl_xtal(*self, frequency)
     }
 
     fn set_tuner_xtal(&mut self, frequency: u32) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_tuner_xtal(self, frequency)
+        T::set_tuner_xtal(*self, frequency)
     }
 
     fn set_bias_tee(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_bias_tee(self, enable)
+        T::set_bias_tee(*self, enable)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gain {
     /// Gain tenths of a dB
-    Manual(i32),
+    ManualValue(i32),
+    ManualIndex(usize),
     /// Auto gain control
     Auto,
 }
