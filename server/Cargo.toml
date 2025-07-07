@@ -1,0 +1,17 @@
+[package]
+name = "rtlsdr-async-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rtl_tcp_rs"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.40", features = ["derive"] }
+color-eyre = "0.6.5"
+dotenvy = "0.15.7"
+rtlsdr-async = { version = "0.1.0", path = "../rtlsdr-async", features = ["tcp"] }
+tokio = { version = "1.46.1", features = ["rt-multi-thread", "macros", "net"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"

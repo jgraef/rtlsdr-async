@@ -40,4 +40,22 @@ loop {
 }
 ```
 
+## `rtl_tcp`
+
+This create comes with a client and server implementation for the [`rtl_tcp`][2] protocol.
+It is gated behind the `tcp` feature, which is enabled by default.
+The `RtlTcpClient` implements the `AsyncReadSamples` and `Configure` traits, and can thus be used somewhat interchangebly with `RtlSdr`.
+
+A server binary is provided in the server directory. To install it, run:
+
+```sh
+cargo install --path server
+```
+
+Then run `rtl_tcp_rs` to start the server.
+
+Different from the original `rtl_tcp` binary, this version allows multiple clients to connect at once.
+
+
 [1]: https://gitea.osmocom.org/sdr/rtl-sdr
+[2]: https://github.com/rtlsdrblog/rtl-sdr-blog/blob/master/src/rtl_tcp.c

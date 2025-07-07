@@ -1,4 +1,3 @@
 [workspace]
 resolver = "1"
-members = ["rtlsdr-async"]
-
+members = ["rtlsdr-async", "server"]
