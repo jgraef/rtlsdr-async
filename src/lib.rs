@@ -192,7 +192,7 @@ impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamplesExact<'
 
 /// Error returned by
 /// [`read_samples_exact`][AsyncReadSamplesExt::read_samples_exact]
-#[derive(Clone, Copy, thiserror::Error)]
+#[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum ReadSamplesExactError<E> {
     /// The stream ended before the buffer could be filled completely.
     #[error("EOF after {num_bytes_read} bytes")]

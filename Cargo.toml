@@ -20,3 +20,6 @@ tracing = "0.1.41"
 [features]
 default = ["tcp"]
 tcp = ["dep:bytes", "dep:tokio-util", "tokio/net", "tokio/io-util", "tokio/macros", "tokio/rt"]
+
+[dev-dependencies]
+tokio = { version = "1.46.0", default-features = false, features = ["rt-multi-thread", "macros"] }
