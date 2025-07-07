@@ -1,0 +1,25 @@
+[package]
+name = "rtlsdr-async"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.23.1", features = ["derive"] }
+bytes = { version = "1.10.1", optional = true }
+derive_more = { version = "2.0.1", features = ["debug"] }
+futures-core = "0.3.31"
+#futures-util = "0.3.31"
+parking_lot = "0.12.4"
+pin-project-lite = "0.2.16"
+rtlsdr_sys = "1.1.0"
+thiserror = "2.0.12"
+tokio = { version = "1.46.0", default-features = false, features = ["sync"] }
+tokio-util = { version = "0.7.15", optional = true }
+tracing = "0.1.41"
+
+[features]
+default = ["tcp"]
+tcp = ["dep:bytes", "dep:tokio-util", "tokio/net", "tokio/io-util", "tokio/macros", "tokio/rt"]
+
+[dev-dependencies]
+tokio = { version = "1.46.0", default-features = false, features = ["rt-multi-thread", "macros"] }
