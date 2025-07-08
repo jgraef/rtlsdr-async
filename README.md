@@ -56,6 +56,18 @@ Then run `rtl_tcp_rs` to start the server.
 
 Different from the original `rtl_tcp` binary, this version allows multiple clients to connect at once.
 
+If you want log output from `rtl_tcp_rs` set the `RUST_LOG` environment variable:
+
+```sh
+RUST_LOG="rtlsdr=debug" rtl_tcp_rs
+```
+
+Some client programs (e.g. SDR++) might not work well with IPv6. `rtl_tcp_rs` by default accepts connections on `localhost`, which might resolve to the IPv6 address `::1`. If you suspect having this issue try to use `127.0.0.1` instead:
+
+```sh
+rtl_tcp_rs --address "127.0.0.1:1234"
+```
+
 
 [1]: https://gitea.osmocom.org/sdr/rtl-sdr
 [2]: https://github.com/rtlsdrblog/rtl-sdr-blog/blob/master/src/rtl_tcp.c
