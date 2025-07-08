@@ -30,6 +30,7 @@ use tokio::sync::{
     mpsc,
     oneshot,
 };
+use tracing::Span;
 
 use crate::{
     AsyncReadSamples,
@@ -719,6 +720,7 @@ impl RtlSdr {
                 handle: self.handle.clone(),
                 frequency,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -738,6 +740,7 @@ impl RtlSdr {
                 handle: self.handle.clone(),
                 sample_rate,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -765,6 +768,7 @@ impl RtlSdr {
                 handle: self.handle.clone(),
                 gain,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -781,6 +785,7 @@ impl RtlSdr {
                 stage,
                 gain,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -796,6 +801,7 @@ impl RtlSdr {
                 handle: self.handle.clone(),
                 bandwidth,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -811,6 +817,7 @@ impl RtlSdr {
                 handle: self.handle.clone(),
                 enable,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -830,6 +837,7 @@ impl RtlSdr {
                 handle: self.handle.clone(),
                 ppm,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -849,6 +857,7 @@ impl RtlSdr {
                 handle: self.handle.clone(),
                 enable,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -874,6 +883,7 @@ impl RtlSdr {
                 rtl_xtal_frequency,
                 tuner_xtal_frequency,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -903,6 +913,7 @@ impl RtlSdr {
                 pin: 0,
                 enable,
                 result_sender,
+                span: Some(Span::current()),
             })
             .await
             .map_err(|_| Error::ControlThreadDead)?;
@@ -1038,7 +1049,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 handle,
                 frequency,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_center_frequency(frequency);
                 let _ = result_sender.send(result);
             }
@@ -1046,7 +1059,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 handle,
                 sample_rate,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_sample_rate(sample_rate);
                 let _ = result_sender.send(result);
             }
@@ -1054,7 +1069,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 handle,
                 gain,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = set_tuner_gain(&handle, gain);
                 let _ = result_sender.send(result);
             }
@@ -1063,7 +1080,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 stage,
                 gain,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_tuner_if_gain(stage, gain);
                 let _ = result_sender.send(result);
             }
@@ -1071,7 +1090,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 handle,
                 bandwidth,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_tuner_bandwidth(bandwidth);
                 let _ = result_sender.send(result);
             }
@@ -1079,7 +1100,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 handle,
                 enable,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_agc_mode(enable);
                 let _ = result_sender.send(result);
             }
@@ -1087,7 +1110,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 handle,
                 ppm,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_frequency_correction(ppm);
                 let _ = result_sender.send(result);
             }
@@ -1095,7 +1120,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 handle,
                 enable,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_offset_tuning(enable);
                 let _ = result_sender.send(result);
             }
@@ -1104,7 +1131,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 rtl_xtal_frequency,
                 tuner_xtal_frequency,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = set_xtal_frequency(&handle, rtl_xtal_frequency, tuner_xtal_frequency);
                 let _ = result_sender.send(result);
             }
@@ -1113,7 +1142,9 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 pin,
                 enable,
                 result_sender,
+                span,
             } => {
+                let _guard = span.map(|span| span.entered());
                 let result = handle.set_bias_tee(pin, enable);
                 let _ = result_sender.send(result);
             }
@@ -1148,54 +1179,64 @@ enum ControlMessage {
         handle: Arc<Handle>,
         frequency: u32,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetSampleRate {
         handle: Arc<Handle>,
         sample_rate: u32,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetTunerGain {
         handle: Arc<Handle>,
         gain: Gain,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetTunerIfGain {
         handle: Arc<Handle>,
         stage: i32,
         gain: i32,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetTunerBandwidth {
         handle: Arc<Handle>,
         bandwidth: u32,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetAgcMode {
         handle: Arc<Handle>,
         enable: bool,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetFrequencyCorrection {
         handle: Arc<Handle>,
         ppm: i32,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetOffsetTuning {
         handle: Arc<Handle>,
         enable: bool,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetXtalFrequency {
         handle: Arc<Handle>,
         rtl_xtal_frequency: Option<u32>,
         tuner_xtal_frequency: Option<u32>,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
     SetBiasTee {
         handle: Arc<Handle>,
         pin: u8,
         enable: bool,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Option<Span>,
     },
 }
 

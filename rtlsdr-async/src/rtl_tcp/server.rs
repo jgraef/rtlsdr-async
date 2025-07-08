@@ -1,7 +1,14 @@
+use std::{
+    fmt::Debug,
+    pin::pin,
+};
+
 use bytes::BufMut;
 use tokio::{
     io::{
+        AsyncRead,
         AsyncReadExt,
+        AsyncWrite,
         AsyncWriteExt,
         BufReader,
     },
@@ -135,17 +142,15 @@ const WRITE_BUFFER_SIZE: usize = 0x2000;
 async fn handle_client<S>(
     mut tcp: TcpStream,
     shutdown: CancellationToken,
-    mut stream: S,
+    stream: S,
     dongle_info: DongleInfo,
 ) -> Result<(), Error>
 where
-    S: AsyncReadSamples + Configure + Send + Unpin + 'static,
+    S: AsyncReadSamples + Configure + Send + Unpin + Clone + 'static,
     <S as AsyncReadSamples>::Error: std::error::Error + Send + Sync + 'static,
     <S as Configure>::Error: std::error::Error + Send + Sync + 'static,
 {
     let mut write_buffer = vec![0u8; WRITE_BUFFER_SIZE];
-    let mut read_buffer = [0u8; COMMAND_LENGTH];
-    let mut read_buffer_cursor = &mut read_buffer[..];
 
     {
         let mut header_buffer = &mut write_buffer[..HEADER_LENGTH];
@@ -156,45 +161,76 @@ where
     tcp.write_all(&write_buffer[..HEADER_LENGTH]).await?;
     tcp.flush().await?;
 
-    let (tcp_read, mut tcp_write) = tcp.split();
+    let (tcp_read, tcp_write) = tcp.split();
 
     // we only buffer the read half, since we only write in batches anyway.
-    let mut tcp_read = BufReader::with_capacity(READ_BUFFER_SIZE, tcp_read);
+    let tcp_read = BufReader::with_capacity(READ_BUFFER_SIZE, tcp_read);
+    let handle_client_commands = pin!(handle_client_commands(tcp_read, stream.clone()));
+    let forward_samples = pin!(forward_samples(tcp_write, stream, write_buffer));
+
+    tokio::select! {
+        _ = shutdown.cancelled() => {},
+        result = handle_client_commands => result?,
+        result = forward_samples => result?,
+    }
+
+    Ok(())
+}
+
+async fn forward_samples<'a, W, S>(
+    mut tcp_write: W,
+    mut stream: S,
+    mut write_buffer: Vec<u8>,
+) -> Result<(), Error>
+where
+    W: AsyncWrite + Unpin,
+    S: AsyncReadSamples + Send + Unpin + 'static,
+    <S as AsyncReadSamples>::Error: std::error::Error + Send + Sync + 'static,
+{
+    loop {
+        let num_samples = stream
+            .read_samples(bytemuck::cast_slice_mut(&mut write_buffer))
+            .await
+            .map_err(|error| Error::Device(Box::new(error)))?;
+        if num_samples == 0 {
+            break;
+        }
+
+        tcp_write
+            .write_all(&write_buffer[0..num_samples * 2])
+            .await?;
+        tcp_write.flush().await?;
+    }
+
+    Ok(())
+}
+
+async fn handle_client_commands<'a, R, S>(
+    mut tcp_read: R,
+    mut stream: S,
+) -> Result<(), std::io::Error>
+where
+    R: AsyncRead + Unpin,
+    S: Configure + Send + Unpin + 'static,
+    <S as Configure>::Error: Debug,
+{
+    let mut read_buffer = [0u8; COMMAND_LENGTH];
 
     loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
+        if let Err(error) = tcp_read.read_exact(&mut read_buffer[..]).await {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
                 break;
             }
-            result = tcp_read.read_buf(&mut read_buffer_cursor) => {
-                if result? == 0 {
-                    break;
-                }
-                if !read_buffer_cursor.has_remaining_mut() {
-                    match Command::decode(&read_buffer[..]) {
-                        Ok(command) => {
-                            if let Err(error) = handle_client_command(command, &mut stream).await {
-                                tracing::warn!(?command, ?error, "error while handling command");
-                            }
-                        }
-                        Err(command) => {
-                            tracing::warn!(?command, "invalid command");
-                        }
-                    }
-                    read_buffer_cursor = &mut read_buffer[..];
+        }
+
+        match Command::decode(&read_buffer[..]) {
+            Ok(command) => {
+                if let Err(error) = handle_client_command(command, &mut stream).await {
+                    tracing::warn!(?command, ?error, "error while handling command");
                 }
             }
-            result = stream.read_samples(bytemuck::cast_slice_mut(&mut write_buffer)) => {
-                let samples_read = result
-                    .map_err(|error| Error::Device(Box::new(error)))?;
-
-                if samples_read == 0 {
-                    break;
-                }
-
-                // todo: we could put this write into the select, so that we can accept commands while writing out a chunk of samples
-                tcp_write.write_all(&write_buffer[0..samples_read * 2]).await?;
-                tcp_write.flush().await?;
+            Err(command) => {
+                tracing::warn!(?command, "invalid command");
             }
         }
     }
@@ -202,31 +238,21 @@ where
     Ok(())
 }
 
-async fn handle_client_command<S>(command: Command, stream: &mut S) -> Result<(), Error>
+async fn handle_client_command<S>(command: Command, stream: &mut S) -> Result<(), S::Error>
 where
     S: Configure + Unpin,
-    <S as Configure>::Error: std::error::Error + Send + Sync + 'static,
 {
     tracing::debug!(?command);
     match command {
         Command::SetCenterFrequency { frequency } => {
-            stream
-                .set_center_frequency(frequency)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?
+            stream.set_center_frequency(frequency).await?;
         }
         Command::SetSampleRate { sample_rate } => {
-            stream
-                .set_sample_rate(sample_rate)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_sample_rate(sample_rate).await?;
         }
         Command::SetTunerGainMode { mode } => {
             if mode == TunerGainMode::Auto {
-                stream
-                    .set_tuner_gain(Gain::Auto)
-                    .await
-                    .map_err(|error| Error::Device(Box::new(error)))?;
+                stream.set_tuner_gain(Gain::Auto).await?;
             }
             else {
                 // don't do anything here. SetTunerGainLevel will set
@@ -234,69 +260,42 @@ where
             }
         }
         Command::SetTunerGain { gain } => {
-            stream
-                .set_tuner_gain(Gain::ManualValue(gain))
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_tuner_gain(Gain::ManualValue(gain)).await?;
         }
         Command::SetFrequencyCorrection { ppm } => {
-            stream
-                .set_frequency_correction(ppm)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_frequency_correction(ppm).await?;
         }
         Command::SetTunerIfGain { stage, gain } => {
-            stream
-                .set_tuner_if_gain(stage, gain)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_tuner_if_gain(stage, gain).await?;
         }
         Command::SetTestMode { enable: _ } => {
             // not supported
         }
         Command::SetAgcMode { enable } => {
-            stream
-                .set_agc_mode(enable)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_agc_mode(enable).await?;
         }
         Command::SetDirectSampling { mode: _ } => {
             // not supported
         }
         Command::SetOffsetTuning { enable } => {
-            stream
-                .set_offset_tuning(enable)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_offset_tuning(enable).await?;
         }
         Command::SetRtlXtal { frequency } => {
-            stream
-                .set_rtl_xtal(frequency)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_rtl_xtal(frequency).await?;
         }
         Command::SetTunerXtal { frequency } => {
-            stream
-                .set_tuner_xtal(frequency)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_tuner_xtal(frequency).await?;
         }
         Command::SetTunerGainIndex { index } => {
             if let Ok(index) = index.try_into() {
-                stream
-                    .set_tuner_gain(Gain::ManualIndex(index))
-                    .await
-                    .map_err(|error| Error::Device(Box::new(error)))?;
+                stream.set_tuner_gain(Gain::ManualIndex(index)).await?;
             }
             else {
                 tracing::error!(?index, "gain index doesn't fit into an usize!");
             }
         }
         Command::SetBiasT { enable } => {
-            stream
-                .set_bias_tee(enable)
-                .await
-                .map_err(|error| Error::Device(Box::new(error)))?;
+            stream.set_bias_tee(enable).await?;
         }
     }
 
