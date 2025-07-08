@@ -53,7 +53,7 @@ const DEFAULT_BUFFER_SIZE: usize = 0x4000; // 16 KiB
 const DEFAULT_QUEUE_SIZE: usize = 64;
 
 /// Errors returned by an [`RtlSdr`]
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
     #[error("librtlsdr error: {function} retured {value}")]
     LibRtlSdr { function: &'static str, value: i32 },
@@ -1166,10 +1166,10 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
     tracing::warn!("control thread terminating");
 }
 
+pub(crate) const CONTROL_QUEUE_SIZE: usize = 128;
+
 /// returns a sender to send commands to the control handler thread.
 fn get_control_queue_sender() -> mpsc::Sender<ControlMessage> {
-    const CONTROL_QUEUE_SIZE: usize = 128;
-
     static CONTROL_QUEUE_SENDER: OnceLock<mpsc::Sender<ControlMessage>> = OnceLock::new();
     let control_queue_sender = CONTROL_QUEUE_SENDER.get_or_init(|| {
         tracing::debug!("spawning control thread");
@@ -1276,16 +1276,14 @@ fn reader_thread(
             break;
         };
 
-        // this will clone, i.e. make a new buffer, if we can't get unique ownership of
-        // it.
-        let buffer_mut = buffer.make_mut(buffer_size);
-        //let buffer_mut = Arc::make_mut(&mut buffer.data);
+        // this will try to reclaim the buffer. if it can't, it'll create a new one.
+        let buffer_mut = buffer.reclaim_or_allocate(buffer_size);
         let buffer_mut = bytemuck::cast_slice_mut(buffer_mut);
 
         // note: we could call read_sync multiple times if one call doesn't fill the
         // buffer, but testing shows that it usually fills the buffer.
         // not sure how it will behave with larger buffer sizes, but you should then
-        // probably choose a better buffer size lol
+        // probably choose a better buffer size.
         match handle.read_sync(buffer_mut) {
             Ok(n_read) => {
                 if n_read > 0 {
@@ -1357,7 +1355,7 @@ mod buffer_queue {
 
         // note: this doesn't copy the buffer if we can't make it mut, but creates a new
         // one
-        pub(crate) fn make_mut(&mut self, capacity: usize) -> &mut [IqSample] {
+        pub(crate) fn reclaim_or_allocate(&mut self, capacity: usize) -> &mut [IqSample] {
             if Arc::get_mut(&mut self.data).is_none() {
                 tracing::debug!("Buffer::make_mut: creating new buffer");
                 *self = Self::new(capacity);
