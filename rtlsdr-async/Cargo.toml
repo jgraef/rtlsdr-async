@@ -17,8 +17,9 @@ tokio-util = { version = "0.7.15", optional = true }
 tracing = "0.1.41"
 
 [features]
-default = ["tcp"]
+default = ["tcp", "sdrpp-server"]
 tcp = ["dep:bytes", "dep:tokio-util", "tokio/net", "tokio/io-util", "tokio/macros", "tokio/rt"]
+sdrpp-server = ["dep:tokio-util", "tokio/net", "tokio/io-util"]
 
 [dev-dependencies]
 tokio = { version = "1.46.0", default-features = false, features = ["rt-multi-thread", "macros"] }

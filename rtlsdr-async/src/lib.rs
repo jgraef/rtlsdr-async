@@ -7,6 +7,8 @@
 mod bindings;
 #[cfg(feature = "tcp")]
 pub mod rtl_tcp;
+#[cfg(feature = "sdrpp-server")]
+pub mod sdrpp_server;
 
 use std::{
     fmt::Debug,

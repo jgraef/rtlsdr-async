@@ -662,7 +662,7 @@ impl Debug for TunerGains {
 ///    thread for all devices.
 /// 2. A thread that reads IQ samples from the device. Each [`RtlSdr`] will
 ///    spawn its own reader thread.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RtlSdr {
     /// the handle for the rtlsdr. this also provides convenient methods. all
     /// methods except reads are synchronized.
