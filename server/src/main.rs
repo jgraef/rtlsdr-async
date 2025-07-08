@@ -8,6 +8,7 @@ use color_eyre::eyre::{
 use rtlsdr_async::{
     RtlSdr,
     rtl_tcp::server::RtlTcpServer,
+    sdrpp_server::SdrppServer,
 };
 use tokio::net::TcpListener;
 
@@ -31,6 +32,10 @@ struct Args {
     /// Sample rate in Hz
     #[clap(short, long, default_value = "2048000")]
     samplerate: u32,
+
+    /// Start a SDR++ server instead of a rtl_tcp server
+    #[clap(long)]
+    sdrpp: bool,
 }
 
 #[tokio::main]
@@ -41,20 +46,26 @@ async fn main() -> Result<(), Error> {
 
     let args = Args::parse();
 
-    let rtl_sdr = RtlSdr::open(args.device)?;
+    /*let rtl_sdr = RtlSdr::open(args.device)?;
     if let Some(frequency) = args.frequency {
         rtl_sdr.set_center_frequency(frequency).await?;
     }
     if let Some(gain) = args.gain {
         rtl_sdr.set_tuner_gain(gain.into()).await?;
     }
-    rtl_sdr.set_sample_rate(args.samplerate).await?;
+    rtl_sdr.set_sample_rate(args.samplerate).await?;*/
 
+    tracing::info!("listening on: {}", args.address);
     let tcp_listener = TcpListener::bind(&args.address).await?;
 
-    RtlTcpServer::from_rtl_sdr(rtl_sdr, tcp_listener)
-        .serve()
-        .await?;
+    if args.sdrpp {
+        SdrppServer::new((), tcp_listener).serve().await?;
+    }
+    else {
+        /*RtlTcpServer::from_rtl_sdr(rtl_sdr, tcp_listener)
+            .serve()
+            .await?;*/
+    }
 
     Ok(())
 }
