@@ -671,7 +671,13 @@ pub struct RtlSdr {
     /// sender to send commands to control thread for slow control commands
     control_queue_sender: mpsc::Sender<ControlMessage>,
 
-    buffer_queue_reader: buffer_queue::Reader,
+    buffer_queue_subscriber: buffer_queue::Subscriber,
+
+    // for now we'll create the receiver the first time poll_read_samples is called.
+    // eventually we want RtlSdr to have a stream method which returns a separate IqStream. This
+    // way we can also have methods that start direct sampling, which would return a different type
+    // of stream. but i'm not sure yet how we would have a unified interface with RtlTcpClient.
+    buffer_queue_reader: Option<buffer_queue::Reader>,
 }
 
 impl RtlSdr {
@@ -693,7 +699,7 @@ impl RtlSdr {
 
         let control_queue_sender = get_control_queue_sender();
 
-        let (buffer_queue_sender, buffer_queue_receiver) = buffer_queue::channel(queue_size);
+        let (buffer_queue_sender, buffer_queue_subscriber) = buffer_queue::channel(queue_size);
 
         thread::spawn({
             let handle = handle.clone();
@@ -705,7 +711,8 @@ impl RtlSdr {
         Ok(Self {
             handle,
             control_queue_sender,
-            buffer_queue_reader: buffer_queue_receiver.into(),
+            buffer_queue_subscriber,
+            buffer_queue_reader: None,
         })
     }
 
@@ -921,6 +928,11 @@ impl RtlSdr {
             .await
             .map_err(|_| Error::ControlThreadDead)?
     }
+
+    fn reader(&mut self) -> &mut buffer_queue::Reader {
+        self.buffer_queue_reader
+            .get_or_insert_with(|| self.buffer_queue_subscriber.receiver().into())
+    }
 }
 
 impl AsyncReadSamples for RtlSdr {
@@ -931,7 +943,7 @@ impl AsyncReadSamples for RtlSdr {
         cx: &mut Context<'_>,
         buffer: &mut [IqSample],
     ) -> Poll<Result<usize, Self::Error>> {
-        Pin::new(&mut self.buffer_queue_reader)
+        Pin::new(self.reader())
             .poll_read_samples(cx, buffer)
             .map_err(|error| match error {})
     }
@@ -944,7 +956,7 @@ impl Stream for RtlSdr {
     type Item = Result<Buffer, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.buffer_queue_reader.receiver)
+        Pin::new(&mut self.reader().receiver)
             .poll_next(cx)
             .map(|ready| ready.map(Ok))
     }
@@ -1245,6 +1257,8 @@ fn reader_thread(
     handle: Arc<Handle>,
     buffer_size: usize,
 ) {
+    let _guard = tracing::debug_span!("reader thread", index = handle.index).entered();
+
     // when we are reading to the buffer we don't hold the queue lock, so once we're
     // done we need to acquire the lock to add the buffer to the queue.
     // but we also need the queue lock to get a new free buffer. we can combine both
@@ -1257,8 +1271,8 @@ fn reader_thread(
     loop {
         let Some(mut buffer) = buffer_queue_sender.swap_buffers(push_buffer, buffer_size)
         else {
-            // all readers dropped
-            tracing::debug!("all readers dropped. exiting reader thread");
+            // all receivers and subscribers dropped
+            tracing::debug!("all readers dropped. exiting");
             break;
         };
 
@@ -1298,7 +1312,10 @@ fn reader_thread(
 
 mod buffer_queue {
     use std::{
-        collections::VecDeque,
+        collections::{
+            HashMap,
+            VecDeque,
+        },
         convert::Infallible,
         fmt::Debug,
         ops::{
@@ -1315,15 +1332,19 @@ mod buffer_queue {
     };
 
     use futures_core::Stream;
-    use parking_lot::Mutex;
+    use parking_lot::{
+        Condvar,
+        Mutex,
+    };
 
     use crate::{
         AsyncReadSamples,
         IqSample,
     };
 
-    #[derive(Clone)]
+    #[derive(Clone, derive_more::Debug)]
     pub struct Buffer {
+        #[debug(skip)]
         pub(crate) data: Arc<[IqSample]>,
         pub(crate) filled: usize,
     }
@@ -1346,12 +1367,6 @@ mod buffer_queue {
         }
     }
 
-    impl Debug for Buffer {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_list().entries(&**self).finish()
-        }
-    }
-
     impl Deref for Buffer {
         type Target = [IqSample];
 
@@ -1360,15 +1375,29 @@ mod buffer_queue {
         }
     }
 
+    #[derive(Debug)]
+    struct Shared {
+        state: Mutex<SharedState>,
+        has_receiver_condition: Condvar,
+    }
+
     /// This is the central queue that passes buffers from the reader thread
     /// (producer) to the AsyncReadSamples impl (consumer).
     ///
     /// The items in the VecDeque are numbered head_pos..tail_pos from head to
     /// tail. Consumers have a read_pos that is relative to that numbering,
     /// so they'll know if they're lagging behind.
-    struct Shared {
+    #[derive(Debug)]
+    struct SharedState {
         /// number of senders. this is either 1 or 0 currently.
         num_senders: usize,
+
+        /// number of subscribers.
+        /// these are like receivers, but they're not actively receiving data
+        /// yet. so don't close the channel if there are subscribers or
+        /// receivers. but we don't have to actually send anything to the
+        /// channel if there are only subscribers.
+        num_subscribers: usize,
 
         /// number of receivers
         num_receivers: usize,
@@ -1387,10 +1416,13 @@ mod buffer_queue {
         capacity: usize,
 
         /// wakers of receivers that are waiting for new buffers
-        wakers: Vec<Waker>,
+        wakers: HashMap<usize, Waker>,
+
+        /// receiver IDs to identify wakers with receivers.
+        next_receiver_id: usize,
     }
 
-    impl Shared {
+    impl SharedState {
         fn pop_buffer(&mut self) -> Option<Buffer> {
             if self.slots.len() == self.capacity {
                 let buffer = self
@@ -1412,37 +1444,86 @@ mod buffer_queue {
             );
             self.slots.push_back(buffer);
             self.tail_pos += 1;
-            for waker in self.wakers.drain(..) {
+            for (_, waker) in self.wakers.drain() {
                 waker.wake();
             }
         }
     }
 
-    #[derive(derive_more::Debug)]
+    #[derive(Debug)]
+    pub struct Subscriber {
+        shared: Arc<Shared>,
+    }
+
+    impl Clone for Subscriber {
+        fn clone(&self) -> Self {
+            let mut state = self.shared.state.lock();
+
+            state.num_subscribers += 1;
+
+            Self {
+                shared: self.shared.clone(),
+            }
+        }
+    }
+
+    impl Drop for Subscriber {
+        fn drop(&mut self) {
+            let mut state = self.shared.state.lock();
+
+            state.num_subscribers -= 1;
+        }
+    }
+
+    impl Subscriber {
+        pub fn receiver(&self) -> Receiver {
+            let mut state = self.shared.state.lock();
+
+            state.num_receivers += 1;
+            if state.num_receivers == 1 {
+                self.shared.has_receiver_condition.notify_one();
+            }
+            let receiver_id = state.next_receiver_id;
+            state.next_receiver_id += 1;
+
+            Receiver {
+                shared: self.shared.clone(),
+                read_pos: state.tail_pos,
+                receiver_id,
+            }
+        }
+    }
+
+    #[derive(Debug)]
     pub struct Receiver {
-        #[debug(skip)]
-        shared: Arc<Mutex<Shared>>,
+        shared: Arc<Shared>,
         read_pos: usize,
+        receiver_id: usize,
     }
 
     impl Clone for Receiver {
         fn clone(&self) -> Self {
-            {
-                let mut queue = self.shared.lock();
-                queue.num_receivers += 1;
+            let mut state = self.shared.state.lock();
+
+            state.num_receivers += 1;
+            if state.num_receivers == 1 {
+                self.shared.has_receiver_condition.notify_one();
             }
+            let receiver_id = state.next_receiver_id;
+            state.next_receiver_id += 1;
 
             Self {
                 shared: self.shared.clone(),
                 read_pos: self.read_pos,
+                receiver_id,
             }
         }
     }
 
     impl Drop for Receiver {
         fn drop(&mut self) {
-            let mut queue = self.shared.lock();
-            queue.num_receivers -= 1;
+            let mut state = self.shared.state.lock();
+            state.num_receivers -= 1;
         }
     }
 
@@ -1455,26 +1536,26 @@ mod buffer_queue {
         ) -> Poll<Option<Self::Item>> {
             let this = self.deref_mut();
 
-            let mut queue = this.shared.lock();
+            let mut state = this.shared.state.lock();
 
             // determine index into the VecDeque
-            let queue_index = if this.read_pos < queue.head_pos {
+            let queue_index = if this.read_pos < state.head_pos {
                 // we're behind, update our read_pos to the current head
-                tracing::debug!(?this.read_pos, ?queue.head_pos, ?queue.tail_pos, "lagging behind by {} chunks", queue.head_pos - this.read_pos);
-                this.read_pos = queue.head_pos;
+                tracing::debug!(?this.read_pos, ?state.head_pos, ?state.tail_pos, "lagging behind by {} chunks", state.head_pos - this.read_pos);
+                this.read_pos = state.head_pos;
                 0
             }
             else {
-                this.read_pos - queue.head_pos
+                this.read_pos - state.head_pos
             };
 
-            if this.read_pos < queue.tail_pos {
+            if this.read_pos < state.tail_pos {
                 // there are buffers we can read
-                let buffer = queue.slots[queue_index].clone();
+                let buffer = state.slots[queue_index].clone();
                 this.read_pos += 1;
                 Poll::Ready(Some(buffer))
             }
-            else if queue.num_senders == 0 {
+            else if state.num_senders == 0 {
                 // there are no buffers left for us to read, and there are no writers left, so
                 // we yield None
                 Poll::Ready(None)
@@ -1482,7 +1563,7 @@ mod buffer_queue {
             else {
                 // there are no buffers left for us to read, but there are still writers, so we
                 // need to wait.
-                queue.wakers.push(cx.waker().clone());
+                state.wakers.insert(this.receiver_id, cx.waker().clone());
                 Poll::Pending
             }
         }
@@ -1580,67 +1661,78 @@ mod buffer_queue {
     #[derive(derive_more::Debug)]
     pub struct Sender {
         #[debug(skip)]
-        shared: Arc<Mutex<Shared>>,
+        shared: Arc<Shared>,
     }
 
     impl Drop for Sender {
         fn drop(&mut self) {
-            let mut queue = self.shared.lock();
-            queue.num_senders -= 1;
+            let mut state = self.shared.state.lock();
+            state.num_senders -= 1;
         }
     }
 
     impl Sender {
         /// Returns a buffer to be filled with data. You can also pass in a
-        /// buffer that you just filled. Returns None if all readers
-        /// dropped.
+        /// buffer that you just filled.
+        ///
+        /// Returns None if all receivers and subscribers dropped.
+        ///
+        /// If there are subscribers, but no receivers this will block until
+        /// there is a receiver.
         pub fn swap_buffers(
             &mut self,
             push_buffer: Option<Buffer>,
             buffer_size: usize,
         ) -> Option<Buffer> {
-            let mut queue = self.shared.lock();
+            let mut state = self.shared.state.lock();
 
-            if queue.num_receivers == 0 {
-                None
-            }
-            else {
-                // first push the buffer we filled in the last loop iteration
-                if let Some(buffer) = push_buffer {
-                    queue.push_buffer(buffer);
+            while state.num_receivers == 0 {
+                if state.num_subscribers == 0 {
+                    return None;
                 }
 
-                // get a free buffer from the queue, or make a new one
-                let buffer = queue
-                    .pop_buffer()
-                    .unwrap_or_else(|| Buffer::new(buffer_size));
-
-                Some(buffer)
+                tracing::debug!("waiting for receivers");
+                self.shared.has_receiver_condition.wait(&mut state);
+                tracing::debug!(num_receivers = state.num_receivers, "resuming");
             }
+
+            // first push the buffer we filled in the last loop iteration
+            if let Some(buffer) = push_buffer {
+                state.push_buffer(buffer);
+            }
+
+            // get a free buffer from the queue, or make a new one
+            let buffer = state
+                .pop_buffer()
+                .unwrap_or_else(|| Buffer::new(buffer_size));
+
+            Some(buffer)
         }
     }
 
-    pub fn channel(num_buffers: usize) -> (Sender, Receiver) {
+    pub fn channel(num_buffers: usize) -> (Sender, Subscriber) {
         assert!(num_buffers > 0);
 
-        let shared = Arc::new(Mutex::new(Shared {
-            num_receivers: 1,
-            num_senders: 1,
-            slots: VecDeque::with_capacity(num_buffers),
-            tail_pos: 0,
-            head_pos: 0,
-            capacity: num_buffers,
-            wakers: vec![],
-        }));
+        let shared = Arc::new(Shared {
+            state: Mutex::new(SharedState {
+                num_subscribers: 1,
+                num_receivers: 0,
+                num_senders: 1,
+                slots: VecDeque::with_capacity(num_buffers),
+                tail_pos: 0,
+                head_pos: 0,
+                capacity: num_buffers,
+                wakers: HashMap::new(),
+                next_receiver_id: 0,
+            }),
+            has_receiver_condition: Condvar::new(),
+        });
 
         (
             Sender {
                 shared: shared.clone(),
             },
-            Receiver {
-                shared,
-                read_pos: 0,
-            },
+            Subscriber { shared },
         )
     }
 }
