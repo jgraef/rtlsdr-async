@@ -12,7 +12,9 @@ use bytes::{
 };
 
 use crate::{
+    Backend,
     DirectSamplingMode,
+    Gain,
     TunerGainMode,
     TunerType,
 };
@@ -198,6 +200,69 @@ impl Command {
                 buffer.put_u32(*enable as u32);
             }
         }
+    }
+
+    async fn apply<B>(&self, backend: &B) -> Result<(), B::Error>
+    where
+        B: Backend + Unpin,
+    {
+        match self {
+            Command::SetCenterFrequency { frequency } => {
+                backend.set_center_frequency(*frequency).await?;
+            }
+            Command::SetSampleRate { sample_rate } => {
+                backend.set_sample_rate(*sample_rate).await?;
+            }
+            Command::SetTunerGainMode { mode } => {
+                if *mode == TunerGainMode::Auto {
+                    backend.set_tuner_gain(Gain::Auto).await?;
+                }
+                else {
+                    // don't do anything here. SetTunerGainLevel will set
+                    // the mode to manual automatically
+                }
+            }
+            Command::SetTunerGain { gain } => {
+                backend.set_tuner_gain(Gain::ManualValue(*gain)).await?;
+            }
+            Command::SetFrequencyCorrection { ppm } => {
+                backend.set_frequency_correction(*ppm).await?;
+            }
+            Command::SetTunerIfGain { stage, gain } => {
+                backend.set_tuner_if_gain(*stage, *gain).await?;
+            }
+            Command::SetTestMode { enable: _ } => {
+                // not supported
+            }
+            Command::SetAgcMode { enable } => {
+                backend.set_agc_mode(*enable).await?;
+            }
+            Command::SetDirectSampling { mode: _ } => {
+                // not supported
+            }
+            Command::SetOffsetTuning { enable } => {
+                backend.set_offset_tuning(*enable).await?;
+            }
+            Command::SetRtlXtal { frequency } => {
+                backend.set_rtl_xtal(*frequency).await?;
+            }
+            Command::SetTunerXtal { frequency } => {
+                backend.set_tuner_xtal(*frequency).await?;
+            }
+            Command::SetTunerGainIndex { index } => {
+                if let Ok(index) = (*index).try_into() {
+                    backend.set_tuner_gain(Gain::ManualIndex(index)).await?;
+                }
+                else {
+                    tracing::error!(?index, "gain index doesn't fit into an usize!");
+                }
+            }
+            Command::SetBiasT { enable } => {
+                backend.set_bias_tee(*enable).await?;
+            }
+        }
+
+        Ok(())
     }
 }
 

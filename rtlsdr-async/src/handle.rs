@@ -7,9 +7,13 @@ use std::{
     ptr::null_mut,
 };
 
-use parking_lot::Mutex;
+use parking_lot::{
+    Mutex,
+    MutexGuard,
+};
 
 use crate::{
+    DirectSamplingMode,
     Error,
     TunerGainMode,
     TunerType,
@@ -24,21 +28,11 @@ use crate::{
 pub(crate) struct Handle {
     // holds some state we want to maintain for this handle. but this should always be used when
     // interacting with the handle. thus this contains the handle.
-    state: Mutex<HandleState>,
+    locked: Mutex<LockedHandle>,
 
     pub index: u32,
     pub tuner_type: TunerType,
     pub tuner_gains: TunerGains,
-}
-
-#[derive(Debug)]
-struct HandleState {
-    handle: rtlsdr_sys::rtlsdr_dev_t,
-
-    /// the tuner gain mode we set previously. we store this so we can skip
-    /// setting it if we would set it to the same mode gain. librtlsdr doesn't
-    /// do this check. initially we don't know the mode, so this is an Option.
-    tuner_gain_mode: Option<TunerGainMode>,
 }
 
 unsafe impl Send for Handle {}
@@ -101,7 +95,7 @@ impl Handle {
         assert_eq!(ret, 0, "rtlsdr_reset_buffer didn't return 0");
 
         Ok(Handle {
-            state: Mutex::new(HandleState {
+            locked: Mutex::new(LockedHandle {
                 handle,
                 tuner_gain_mode: None,
             }),
@@ -111,9 +105,34 @@ impl Handle {
         })
     }
 
-    pub fn get_center_frequency(&self) -> Result<u32, Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_get_center_freq(state.handle) };
+    pub fn lock(&self) -> MutexGuard<'_, LockedHandle> {
+        self.locked.lock()
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        tracing::debug!(index = self.index, "rtl_sdr_close");
+        let state = self.locked.lock();
+        unsafe {
+            rtlsdr_sys::rtlsdr_close(state.handle);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct LockedHandle {
+    handle: rtlsdr_sys::rtlsdr_dev_t,
+
+    /// the tuner gain mode we set previously. we store this so we can skip
+    /// setting it if we would set it to the same mode gain. librtlsdr doesn't
+    /// do this check. initially we don't know the mode, so this is an Option.
+    tuner_gain_mode: Option<TunerGainMode>,
+}
+
+impl LockedHandle {
+    pub fn get_center_frequency(&mut self) -> Result<u32, Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_center_freq(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_center_freq");
         if ret == 0 {
             Err(Error::from_lib("rtlsdr_get_center_freq", 0))
@@ -123,9 +142,8 @@ impl Handle {
         }
     }
 
-    pub fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_center_freq(state.handle, frequency) };
+    pub fn set_center_frequency(&mut self, frequency: u32) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_center_freq(self.handle, frequency) };
         tracing::debug!(ret, frequency, "rtlsdr_set_center_freq");
         if ret == 0 {
             Ok(())
@@ -135,11 +153,10 @@ impl Handle {
         }
     }
 
-    pub fn get_sample_rate(&self) -> Result<u32, Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_get_sample_rate(state.handle) };
-        tracing::debug!(ret, "rtlsdr_get_sample_rate");
-        if ret == 0 {
+    pub fn get_sample_rate(&mut self) -> Result<u32, Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_sample_rate(self.handle) };
+        tracing::trace!(ret, "rtlsdr_get_sample_rate");
+        if ret != 0 {
             Ok(ret)
         }
         else {
@@ -147,9 +164,8 @@ impl Handle {
         }
     }
 
-    pub fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_sample_rate(state.handle, sample_rate) };
+    pub fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_sample_rate(self.handle, sample_rate) };
         tracing::debug!(ret, sample_rate, "rtlsdr_set_sample_rate");
         if ret == 0 {
             Ok(())
@@ -159,11 +175,9 @@ impl Handle {
         }
     }
 
-    pub fn set_tuner_gain_mode(&self, mode: TunerGainMode) -> Result<(), Error> {
-        let mut state = self.state.lock();
-
+    pub fn set_tuner_gain_mode(&mut self, mode: TunerGainMode) -> Result<(), Error> {
         // if the mode is already set, don't set it again
-        if state
+        if self
             .tuner_gain_mode
             .map_or(false, |current| current == mode)
         {
@@ -172,7 +186,7 @@ impl Handle {
 
         let ret = unsafe {
             rtlsdr_sys::rtlsdr_set_tuner_gain_mode(
-                state.handle,
+                self.handle,
                 match mode {
                     TunerGainMode::Manual => 1,
                     TunerGainMode::Auto => 0,
@@ -181,7 +195,7 @@ impl Handle {
         };
         tracing::debug!(ret, ?mode, "rtlsdr_set_tuner_gain_mode");
         if ret == 0 {
-            state.tuner_gain_mode = Some(mode);
+            self.tuner_gain_mode = Some(mode);
             Ok(())
         }
         else {
@@ -189,9 +203,8 @@ impl Handle {
         }
     }
 
-    pub fn get_tuner_gain(&self) -> Result<i32, Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_get_tuner_gain(state.handle) };
+    pub fn get_tuner_gain(&mut self) -> Result<i32, Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_tuner_gain(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_tuner_gain");
         // note: looking at the librtlsdr source it looks like that 0 is also a valid
         // gain value. rtlsdr_get_tuner_gain only fails if the provided dev
@@ -205,9 +218,8 @@ impl Handle {
         }
     }
 
-    pub fn set_tuner_gain(&self, gain: i32) -> Result<(), Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_gain(state.handle, gain) };
+    pub fn set_tuner_gain(&mut self, gain: i32) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_gain(self.handle, gain) };
         tracing::debug!(ret, gain, "rtlsdr_set_tuner_gain");
         if ret == 0 {
             Ok(())
@@ -217,9 +229,8 @@ impl Handle {
         }
     }
 
-    pub fn set_tuner_if_gain(&self, stage: i32, gain: i32) -> Result<(), Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_if_gain(state.handle, stage, gain) };
+    pub fn set_tuner_if_gain(&mut self, stage: i32, gain: i32) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_if_gain(self.handle, stage, gain) };
         tracing::debug!(ret, gain, "rtlsdr_set_tuner_if_gain");
         if ret == 0 {
             Ok(())
@@ -229,9 +240,8 @@ impl Handle {
         }
     }
 
-    pub fn set_tuner_bandwidth(&self, bandwidth: u32) -> Result<(), Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_bandwidth(state.handle, bandwidth) };
+    pub fn set_tuner_bandwidth(&mut self, bandwidth: u32) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_tuner_bandwidth(self.handle, bandwidth) };
         tracing::debug!(ret, bandwidth, "rtlsdr_set_tuner_bandwidth");
         if ret == 0 {
             Ok(())
@@ -241,9 +251,8 @@ impl Handle {
         }
     }
 
-    pub fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_agc_mode(state.handle, enable as i32) };
+    pub fn set_agc_mode(&mut self, enable: bool) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_agc_mode(self.handle, enable as i32) };
         tracing::debug!(ret, ?enable, "rtlsdr_set_agc_mode");
         if ret == 0 {
             Ok(())
@@ -253,17 +262,15 @@ impl Handle {
         }
     }
 
-    pub fn get_frequency_correction(&self) -> Result<i32, Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_get_freq_correction(state.handle) };
+    pub fn get_frequency_correction(&mut self) -> Result<i32, Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_freq_correction(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_freq_correction");
         // note: only returns errors for dev=null, and besides 0 is a valid return value
         Ok(ret)
     }
 
-    pub fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_freq_correction(state.handle, ppm) };
+    pub fn set_frequency_correction(&mut self, ppm: i32) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_freq_correction(self.handle, ppm) };
         tracing::debug!(ret, ?ppm, "rtlsdr_set_freq_correction");
         // -2 means that this value is already set, so not really an error
         if ret == 0 || ret == -2 {
@@ -274,40 +281,16 @@ impl Handle {
         }
     }
 
-    pub fn get_offset_tuning(&self) -> Result<bool, Error> {
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_get_offset_tuning(state.handle) };
+    pub fn get_offset_tuning(&mut self) -> Result<bool, Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_offset_tuning(self.handle) };
         tracing::debug!(ret, "rtlsdr_get_offset_tuning");
         // note: only returns errors for dev=null
         assert!(ret == 0 || ret == 1);
         Ok(ret == 1)
     }
 
-    pub fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
-        // from the rtlsdr_set_offset_tuning code:
-        //
-        // ```c
-        // if ((dev->tuner_type == RTLSDR_TUNER_R820T) ||
-        //   (dev->tuner_type == RTLSDR_TUNER_R828D)) {
-        //   /* RTL-SDR-BLOG Hack, enables us to turn on the bias tee by
-        //    * clicking on "offset tuning" in software that doesn't have
-        //    * specified bias tee support. Offset tuning is not used for
-        //    *R820T devices so it is no problem.
-        //    */
-        //    rtlsdr_set_bias_tee(dev, on);
-        //    return -2;
-        // }
-        // ```
-        //
-        // we will return Error::Unsupported if anyone tries to **enable** Bias-T on an
-        // R8xx. If we decided that we want to allow this hack, we need to also accept
-        // -2 as a ok return value.
-        if self.tuner_type.is_r82xx() {
-            return Err(Error::Unsupported);
-        }
-
-        let state = self.state.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_offset_tuning(state.handle, enable as i32) };
+    pub fn set_offset_tuning(&mut self, enable: bool) -> Result<(), Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_offset_tuning(self.handle, enable as i32) };
         tracing::debug!(ret, ?enable, "rtlsdr_set_offset_tuning");
         if ret == 0 {
             Ok(())
@@ -317,13 +300,12 @@ impl Handle {
         }
     }
 
-    pub fn get_xtal_frequency(&self) -> Result<(u32, u32), Error> {
-        let state = self.state.lock();
+    pub fn get_xtal_frequency(&mut self) -> Result<(u32, u32), Error> {
         let mut rtl_frequency = 0;
         let mut tuner_frequency = 0;
         let ret = unsafe {
             rtlsdr_sys::rtlsdr_get_xtal_freq(
-                state.handle,
+                self.handle,
                 &mut rtl_frequency as *mut u32,
                 &mut tuner_frequency as *mut u32,
             )
@@ -340,13 +322,12 @@ impl Handle {
     }
 
     pub fn set_xtal_frequency(
-        &self,
+        &mut self,
         rtl_frequency: u32,
         tuner_frequency: u32,
     ) -> Result<(), Error> {
-        let state = self.state.lock();
         let ret = unsafe {
-            rtlsdr_sys::rtlsdr_set_xtal_freq(state.handle, rtl_frequency, tuner_frequency)
+            rtlsdr_sys::rtlsdr_set_xtal_freq(self.handle, rtl_frequency, tuner_frequency)
         };
         tracing::debug!(
             ret,
@@ -362,11 +343,11 @@ impl Handle {
         }
     }
 
-    pub fn set_bias_tee(&self, pin: u8, enable: bool) -> Result<(), Error> {
+    pub fn set_bias_tee(&mut self, pin: u8, enable: bool) -> Result<(), Error> {
         // todo: missing from ffi bindings
 
         /*let _guard = self.control_lock.lock();
-        let ret = unsafe { rtlsdr_sys::rtlsdr_set_bias_tee_gpio(state.handle, pin.into(), enable as i32) };
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_bias_tee_gpio(self.handle, pin.into(), enable as i32) };
         tracing::debug!(ret, ?rtl_frequency, ?tuner_frequency, "rtlsdr_set_bias_tee_gpio");
         if ret == 0 {
             Ok(())
@@ -381,20 +362,45 @@ impl Handle {
         Ok(())
     }
 
+    pub fn get_direct_sampling(&mut self) -> Result<Option<DirectSamplingMode>, Error> {
+        let ret = unsafe { rtlsdr_sys::rtlsdr_get_direct_sampling(self.handle) };
+        tracing::trace!(ret, "rtlsdr_get_direct_sampling");
+        match ret {
+            0 => Ok(None),
+            1 => Ok(Some(DirectSamplingMode::I)),
+            2 => Ok(Some(DirectSamplingMode::Q)),
+            _ => Err(Error::from_lib("rtlsdr_get_direct_sampling", ret)),
+        }
+    }
+
+    pub fn set_direct_sampling(&mut self, mode: Option<DirectSamplingMode>) -> Result<(), Error> {
+        let mode_value = match mode {
+            None => 0,
+            Some(DirectSamplingMode::I) => 1,
+            Some(DirectSamplingMode::Q) => 2,
+        };
+        let ret = unsafe { rtlsdr_sys::rtlsdr_set_direct_sampling(self.handle, mode_value) };
+        tracing::debug!(ret, ?mode, "rtlsdr_set_direct_sampling");
+        if ret == 0 {
+            Ok(())
+        }
+        else {
+            Err(Error::from_lib("rtlsdr_set_direct_sampling", ret))
+        }
+    }
+
     /// this is synchronized with the rest of the methods on this.
     /// initially it wasn't to allow for asynchronous control and sampling. but
     /// i believe it's better this was, as this way we know exactly what state
     /// the handle is in when sampling.
     ///
     /// a quick test showed that this usually fills the whole buffer.
-    pub fn read_sync(&self, buffer: &mut [u8]) -> Result<usize, Error> {
-        let state = self.state.lock();
-
+    pub fn read_sync(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
         let mut n_read = 0;
 
         let ret = unsafe {
             rtlsdr_sys::rtlsdr_read_sync(
-                state.handle,
+                self.handle,
                 buffer.as_mut_ptr() as *mut c_void,
                 buffer
                     .len()
@@ -409,16 +415,6 @@ impl Handle {
         }
         else {
             Err(Error::from_lib("rtlsdr_read_sync", ret))
-        }
-    }
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        tracing::debug!(index = self.index, "rtl_sdr_close");
-        let state = self.state.lock();
-        unsafe {
-            rtlsdr_sys::rtlsdr_close(state.handle);
         }
     }
 }

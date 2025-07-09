@@ -1,6 +1,9 @@
-use std::ffi::{
-    CStr,
-    c_char,
+use std::{
+    ffi::{
+        CStr,
+        c_char,
+    },
+    fmt::Debug,
 };
 
 use crate::{
@@ -122,7 +125,7 @@ struct UsbStrings {
     serial: UsbString,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct UsbString {
     bytes: [u8; Self::BUFFER_SIZE],
     length: usize,
@@ -139,7 +142,22 @@ impl UsbString {
         Self { bytes, length }
     }
 
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+
     pub fn as_str(&self) -> Option<&str> {
-        str::from_utf8(&self.bytes[..self.length]).ok()
+        str::from_utf8(self.as_bytes()).ok()
+    }
+}
+
+impl Debug for UsbString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(s) = self.as_str() {
+            Debug::fmt(s, f)
+        }
+        else {
+            Debug::fmt(self.as_bytes(), f)
+        }
     }
 }

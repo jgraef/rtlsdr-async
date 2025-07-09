@@ -1,45 +1,55 @@
+use futures_util::TryStreamExt;
 use rtlsdr_async::{
-    AsyncReadSamplesExt,
+    Error,
     Gain,
-    IqSample,
     RtlSdr,
 };
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Error> {
     // open first RTL-SDR found
-    let mut rtlsdr = RtlSdr::open(0).unwrap();
+    let rtlsdr = RtlSdr::open(0)?;
 
     // set frequency to 144 MHz
-    rtlsdr.set_center_frequency(144_000_000).await.unwrap();
+    rtlsdr.set_center_frequency(144_000_000).await?;
 
     // set sample rate to 2 Mhz
-    rtlsdr.set_sample_rate(2_000_000).await.unwrap();
+    rtlsdr.set_sample_rate(2_000_000).await?;
 
     // enable tuner auto gain and AGC
-    rtlsdr.set_tuner_gain(Gain::Auto).await.unwrap();
-    rtlsdr.set_agc_mode(true).await.unwrap();
+    rtlsdr.set_tuner_gain(Gain::Auto).await?;
+    rtlsdr.set_agc_mode(true).await?;
 
-    // create a buffer to hold all 2 million samples, i.e. all samples for 1 s.
-    let mut buf = vec![IqSample::default(); 2_000_000];
+    // start sampling IQ
+    let mut stream = rtlsdr.samples().await?;
 
-    loop {
-        // fill buffer
-        rtlsdr.read_samples_exact(&mut buf).await.unwrap();
-
+    let mut power_sum = 0.0;
+    let mut num_samples = 0;
+    while let Some(chunk) = stream.try_next().await? {
         // average
-        let mut average = [0.0; 2];
-        for sample in &buf {
+
+        for sample in chunk.samples() {
             let i = u8_to_f32(sample.i);
             let q = u8_to_f32(sample.q);
-            average[0] += i;
-            average[1] += q;
-        }
-        let i = average[0] / 2_000_000.0;
-        let q = average[1] / 2_000_000.0;
+            let power = i * i + q * q;
 
-        println!("{i:.4} {q:.4}i");
+            power_sum += power;
+            num_samples += 1;
+
+            if num_samples == 2_000_000 {
+                let n = num_samples as f32;
+                let power_avg = power_sum / n;
+
+                let db = 10.0 * power_avg.log10();
+                println!("{db:.4} dBFS");
+
+                power_sum = 0.0;
+                num_samples = 0;
+            }
+        }
     }
+
+    Ok(())
 }
 
 fn u8_to_f32(x: u8) -> f32 {

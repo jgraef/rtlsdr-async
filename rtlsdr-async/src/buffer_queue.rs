@@ -3,12 +3,8 @@ use std::{
         HashMap,
         VecDeque,
     },
-    convert::Infallible,
     fmt::Debug,
-    ops::{
-        Deref,
-        DerefMut,
-    },
+    ops::DerefMut,
     pin::Pin,
     sync::Arc,
     task::{
@@ -18,33 +14,39 @@ use std::{
     },
 };
 
-use futures_core::Stream;
+use bytes::BufMut;
+use futures_util::Stream;
 use parking_lot::{
     Condvar,
     Mutex,
 };
+use tokio::io::AsyncRead;
 
-use crate::{
-    AsyncReadSamples,
-    IqSample,
-};
+use crate::SampleType;
 
 #[derive(Clone, derive_more::Debug)]
 pub struct Buffer {
     #[debug(skip)]
-    pub(crate) data: Arc<[IqSample]>,
-    pub(crate) filled: usize,
+    data: Arc<[u8]>,
+    pub filled: usize,
+    pub sample_rate: u32,
+    pub sample_type: SampleType,
 }
 
 impl Buffer {
     pub(crate) fn new(capacity: usize) -> Self {
-        let data = std::iter::repeat_n(IqSample::default(), capacity).collect();
-        Self { data, filled: 0 }
+        let data = std::iter::repeat_n(0, capacity).collect();
+        Self {
+            data,
+            filled: 0,
+            sample_rate: 0,
+            sample_type: SampleType::Iq,
+        }
     }
 
     // note: this doesn't copy the buffer if we can't make it mut, but creates a new
     // one
-    pub(crate) fn reclaim_or_allocate(&mut self, capacity: usize) -> &mut [IqSample] {
+    pub(crate) fn reclaim_or_allocate(&mut self, capacity: usize) -> &mut [u8] {
         if Arc::get_mut(&mut self.data).is_none() {
             tracing::debug!("Buffer::make_mut: creating new buffer");
             *self = Self::new(capacity);
@@ -52,18 +54,8 @@ impl Buffer {
 
         Arc::get_mut(&mut self.data).expect("Arc::get_mut failed")
     }
-}
 
-impl Deref for Buffer {
-    type Target = [IqSample];
-
-    fn deref(&self) -> &Self::Target {
-        &self.data[..self.filled]
-    }
-}
-
-impl AsRef<[IqSample]> for Buffer {
-    fn as_ref(&self) -> &[IqSample] {
+    pub fn filled(&self) -> &[u8] {
         &self.data[..self.filled]
     }
 }
@@ -295,41 +287,36 @@ impl From<Receiver> for Reader {
     }
 }
 
-impl AsyncReadSamples for Reader {
-    type Error = Infallible;
-
-    fn poll_read_samples(
-        mut self: std::pin::Pin<&mut Self>,
+impl AsyncRead for Reader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buffer: &mut [crate::IqSample],
-    ) -> Poll<Result<usize, Self::Error>> {
-        let buffer_out = buffer;
-        let mut buffer_out_pos = 0;
-
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         loop {
             let this = self.deref_mut();
 
             if let Some(buffer_in) = &this.buffer {
+                let buffer_in = buffer_in.filled();
+
                 assert!(this.buffer_pos < buffer_in.len());
 
-                if buffer_out.is_empty() {
-                    return Poll::Ready(Ok(0));
+                if !buf.has_remaining_mut() {
+                    return Poll::Ready(Ok(()));
                 }
 
-                let copy_amount =
-                    (buffer_out.len() - buffer_out_pos).min(buffer_in.len() - this.buffer_pos);
+                let copy_amount = buf.remaining().min(buffer_in.len() - this.buffer_pos);
 
-                buffer_out[buffer_out_pos..][..copy_amount]
-                    .copy_from_slice(&buffer_in[this.buffer_pos..][..copy_amount]);
+                buf.put_slice(&buffer_in[this.buffer_pos..][..copy_amount]);
+
                 this.buffer_pos += copy_amount;
-                buffer_out_pos += copy_amount;
 
                 if this.buffer_pos == buffer_in.len() {
                     this.buffer_pos = 0;
                     this.buffer = None;
                 }
 
-                if buffer_out_pos == buffer_out.len() {
+                if buf.has_remaining_mut() {
                     break;
                 }
             }
@@ -339,7 +326,7 @@ impl AsyncReadSamples for Reader {
 
                 match Pin::new(&mut this.receiver).poll_next(cx) {
                     Poll::Pending => {
-                        if buffer_out_pos == 0 {
+                        if buf.filled().is_empty() {
                             return Poll::Pending;
                         }
                         else {
@@ -347,7 +334,7 @@ impl AsyncReadSamples for Reader {
                         }
                     }
                     Poll::Ready(None) => {
-                        return Poll::Ready(Ok(buffer_out_pos));
+                        break;
                     }
                     Poll::Ready(Some(buffer)) => {
                         this.buffer = Some(buffer);
@@ -356,7 +343,7 @@ impl AsyncReadSamples for Reader {
             }
         }
 
-        Poll::Ready(Ok(buffer_out_pos))
+        Poll::Ready(Ok(()))
     }
 }
 

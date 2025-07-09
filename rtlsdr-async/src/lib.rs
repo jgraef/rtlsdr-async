@@ -15,6 +15,7 @@ pub mod rtl_tcp;
 
 use std::{
     fmt::Debug,
+    marker::PhantomData,
     pin::Pin,
     sync::Arc,
     task::{
@@ -27,18 +28,15 @@ use bytemuck::{
     Pod,
     Zeroable,
 };
-use futures_core::Stream;
-use pin_project_lite::pin_project;
+use futures_util::Stream;
 
-pub use crate::{
-    buffer_queue::Buffer,
-    enumerate::{
-        DeviceInfo,
-        DeviceIter,
-        devices,
-    },
+pub use crate::enumerate::{
+    DeviceInfo,
+    DeviceIter,
+    devices,
 };
 use crate::{
+    buffer_queue::Buffer,
     control::Control,
     handle::Handle,
     sampling::spawn_reader_thread,
@@ -102,12 +100,6 @@ pub struct RtlSdr {
     control: Control,
 
     buffer_queue_subscriber: buffer_queue::Subscriber,
-
-    // for now we'll create the receiver the first time poll_read_samples is called.
-    // eventually we want RtlSdr to have a stream method which returns a separate IqStream. This
-    // way we can also have methods that start direct sampling, which would return a different type
-    // of stream. but i'm not sure yet how we would have a unified interface with RtlTcpClient.
-    buffer_queue_reader: Option<buffer_queue::Reader>,
 }
 
 impl RtlSdr {
@@ -130,7 +122,6 @@ impl RtlSdr {
         Ok(Self {
             control,
             buffer_queue_subscriber,
-            buffer_queue_reader: None,
         })
     }
 
@@ -214,80 +205,147 @@ impl RtlSdr {
         self.control.set_bias_tee(enable).await
     }
 
-    fn reader(&mut self) -> &mut buffer_queue::Reader {
-        self.buffer_queue_reader
-            .get_or_insert_with(|| self.buffer_queue_subscriber.receiver().into())
+    pub async fn samples(&self) -> Result<Samples<Iq>, Error> {
+        self.control.set_direct_sampling(None).await?;
+        Ok(Samples {
+            receiver: self.buffer_queue_subscriber.receiver(),
+            sample_type: SampleType::Iq,
+            _phantom: PhantomData,
+        })
+    }
+
+    pub async fn direct_samples(&self, mode: DirectSamplingMode) -> Result<Samples<u8>, Error> {
+        self.control.set_direct_sampling(Some(mode)).await?;
+        Ok(Samples {
+            receiver: self.buffer_queue_subscriber.receiver(),
+            sample_type: mode.into(),
+            _phantom: PhantomData,
+        })
     }
 }
 
-impl AsyncReadSamples for RtlSdr {
+impl Backend for RtlSdr {
     type Error = Error;
 
-    fn poll_read_samples(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut [IqSample],
-    ) -> Poll<Result<usize, Self::Error>> {
-        Pin::new(self.reader())
-            .poll_read_samples(cx, buffer)
-            .map_err(|error| match error {})
+    async fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_center_frequency(self, frequency).await
     }
+
+    async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
+        RtlSdr::set_sample_rate(self, sample_rate).await
+    }
+
+    async fn set_tuner_gain(&self, gain: Gain) -> Result<(), Error> {
+        RtlSdr::set_tuner_gain(self, gain).await
+    }
+
+    async fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_agc_mode(self, enable).await
+    }
+
+    async fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
+        RtlSdr::set_frequency_correction(self, ppm).await
+    }
+
+    async fn set_tuner_if_gain(&self, stage: i16, gain: i16) -> Result<(), Error> {
+        RtlSdr::set_tuner_if_gain(self, stage.into(), gain.into()).await
+    }
+
+    async fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_offset_tuning(self, enable).await
+    }
+
+    async fn set_rtl_xtal(&self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_rtl_xtal(self, frequency).await
+    }
+
+    async fn set_tuner_xtal(&self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_tuner_xtal(self, frequency).await
+    }
+
+    async fn set_bias_tee(&self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_bias_tee(self, enable).await
+    }
+
+    async fn samples(&self) -> Result<Samples<Iq>, Error> {
+        RtlSdr::samples(self).await
+    }
+
+    async fn direct_samples(&self, mode: DirectSamplingMode) -> Result<Samples<u8>, Error> {
+        RtlSdr::direct_samples(self, mode).await
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Samples<T> {
+    receiver: buffer_queue::Receiver,
+    sample_type: SampleType,
+    _phantom: PhantomData<fn() -> T>,
 }
 
 // this could just return the buffers without the Result, because the buffer
 // queue doesn't return errors, but for future compatibility we will make it
 // return Results.
-impl Stream for RtlSdr {
-    type Item = Result<Buffer, Error>;
+impl<T> Stream for Samples<T> {
+    type Item = Result<Chunk<T>, Error>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.reader().receiver)
-            .poll_next(cx)
-            .map(|ready| ready.map(Ok))
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Chunk<T>, Error>>> {
+        match Pin::new(&mut self.receiver).poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => Poll::Ready(None),
+            //Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+            Poll::Ready(Some(buffer)) => {
+                if self.sample_type == buffer.sample_type {
+                    Poll::Ready(Some(Ok(Chunk {
+                        buffer,
+                        _phantom: PhantomData,
+                    })))
+                }
+                else {
+                    // switched sampling mode, so this stream ends
+                    Poll::Ready(None)
+                }
+            }
+        }
     }
 }
 
-impl Configure for RtlSdr {
-    type Error = Error;
+#[derive(Clone, Debug)]
+pub struct Chunk<T> {
+    buffer: Buffer,
+    _phantom: PhantomData<fn() -> T>,
+}
 
-    async fn set_center_frequency(&mut self, frequency: u32) -> Result<(), Error> {
-        RtlSdr::set_center_frequency(&*self, frequency).await
+impl<T: Pod> Chunk<T> {
+    #[inline(always)]
+    pub fn samples(&self) -> &[T] {
+        bytemuck::cast_slice(self.buffer.filled())
     }
 
-    async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
-        RtlSdr::set_sample_rate(&*self, sample_rate).await
+    #[inline(always)]
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.samples().iter()
+    }
+}
+
+impl<T> Chunk<T> {
+    #[inline(always)]
+    pub fn sample_rate(&self) -> u32 {
+        self.buffer.sample_rate
     }
 
-    async fn set_tuner_gain(&mut self, gain: Gain) -> Result<(), Error> {
-        RtlSdr::set_tuner_gain(&*self, gain).await
+    #[inline(always)]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.buffer.filled()
     }
+}
 
-    async fn set_agc_mode(&mut self, enable: bool) -> Result<(), Error> {
-        RtlSdr::set_agc_mode(&*self, enable).await
-    }
-
-    async fn set_frequency_correction(&mut self, ppm: i32) -> Result<(), Error> {
-        RtlSdr::set_frequency_correction(&*self, ppm).await
-    }
-
-    async fn set_tuner_if_gain(&mut self, stage: i16, gain: i16) -> Result<(), Error> {
-        RtlSdr::set_tuner_if_gain(&*self, stage.into(), gain.into()).await
-    }
-
-    async fn set_offset_tuning(&mut self, enable: bool) -> Result<(), Error> {
-        RtlSdr::set_offset_tuning(&*self, enable).await
-    }
-
-    async fn set_rtl_xtal(&mut self, frequency: u32) -> Result<(), Error> {
-        RtlSdr::set_rtl_xtal(&*self, frequency).await
-    }
-
-    async fn set_tuner_xtal(&mut self, frequency: u32) -> Result<(), Error> {
-        RtlSdr::set_tuner_xtal(&*self, frequency).await
-    }
-
-    async fn set_bias_tee(&mut self, enable: bool) -> Result<(), Error> {
-        RtlSdr::set_bias_tee(&*self, enable).await
+impl<T: Pod> AsRef<[T]> for Chunk<T> {
+    fn as_ref(&self) -> &[T] {
+        self.samples()
     }
 }
 
@@ -299,222 +357,42 @@ impl Configure for RtlSdr {
 /// [1]: https://k3xec.com/packrat-processing-iq/
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 #[repr(C)]
-pub struct IqSample {
+pub struct Iq {
     /// I: in-phase / real component
     pub i: u8,
     /// Q: quadrature / imaginary component
     pub q: u8,
 }
 
-impl Default for IqSample {
+impl Default for Iq {
     fn default() -> Self {
         Self { i: 128, q: 128 }
     }
 }
 
-/// Trait for async reading of samples.
-///
-/// This works pretty much like futures [`AsyncRead`][1],
-/// except it works with 16 bit [`IqSample`]s instead of single bytes.
-///
-/// [1]: https://docs.rs/futures/latest/futures/io/trait.AsyncRead.html
-pub trait AsyncReadSamples {
-    /// Error that might occur when reading the IQ stream.
-    type Error;
-
-    /// Poll the stream to fill a buffer with IQ samples.
-    fn poll_read_samples(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut [IqSample],
-    ) -> Poll<Result<usize, Self::Error>>;
-}
-
-impl<T: ?Sized + AsyncReadSamples + Unpin> AsyncReadSamples for &mut T {
-    type Error = <T as AsyncReadSamples>::Error;
-
-    fn poll_read_samples(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut [IqSample],
-    ) -> Poll<Result<usize, Self::Error>> {
-        Pin::new(&mut **self).poll_read_samples(cx, buffer)
-    }
-}
-
-/// Extension trait for [`AsyncReadSamples`] with some useful methods.
-pub trait AsyncReadSamplesExt: AsyncReadSamples {
-    /// Read IQ samples into a buffer.
-    ///
-    /// This will call
-    /// [`poll_read_samples`][AsyncReadSamples::poll_read_samples] exactly once,
-    /// and return the number of bytes read. This is cancellation-safe.
-    fn read_samples<'a>(&'a mut self, buffer: &'a mut [IqSample]) -> ReadSamples<'a, Self>
-    where
-        Self: Unpin,
-    {
-        ReadSamples {
-            stream: self,
-            buffer,
-        }
-    }
-
-    /// Read IQ samples into a buffer until the buffer is full.
-    ///
-    /// This might call
-    /// [`poll_read_samples`][AsyncReadSamples::poll_read_samples] multiple
-    /// times, and thus is not cancellation-safe.
-    fn read_samples_exact<'a>(
-        &'a mut self,
-        buffer: &'a mut [IqSample],
-    ) -> ReadSamplesExact<'a, Self>
-    where
-        Self: Unpin,
-    {
-        ReadSamplesExact {
-            stream: self,
-            buffer,
-            filled: 0,
-        }
-    }
-
-    /// Maps any errors returned by the underlying stream with the provided
-    /// closure.
-    fn map_err<E, F>(self, f: F) -> MapErr<Self, F>
-    where
-        F: FnMut(Self::Error) -> E,
-        Self: Sized,
-    {
-        MapErr {
-            inner: self,
-            map_err: f,
-        }
-    }
-}
-
-impl<T: AsyncReadSamples> AsyncReadSamplesExt for T {}
-
-/// Future that reads samples into a buffer.
-pub struct ReadSamples<'a, S: ?Sized> {
-    stream: &'a mut S,
-    buffer: &'a mut [IqSample],
-}
-
-impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamples<'a, S> {
-    type Output = Result<usize, S::Error>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
-        Pin::new(&mut *this.stream).poll_read_samples(cx, this.buffer)
-    }
-}
-
-/// Future that tries to read an exact amount of samples.
-#[derive(Debug)]
-pub struct ReadSamplesExact<'a, S: ?Sized> {
-    stream: &'a mut S,
-    buffer: &'a mut [IqSample],
-    filled: usize,
-}
-
-impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamplesExact<'a, S> {
-    type Output = Result<(), ReadSamplesExactError<S::Error>>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        while self.filled < self.buffer.len() {
-            let this = &mut *self;
-            match Pin::new(&mut *this.stream).poll_read_samples(cx, &mut this.buffer[this.filled..])
-            {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => {
-                    return Poll::Ready(Err(ReadSamplesExactError::Other(error)));
-                }
-                Poll::Ready(Ok(num_samples_read)) => {
-                    if num_samples_read == 0 {
-                        break;
-                    }
-                    else {
-                        this.filled += num_samples_read;
-                    }
-                }
-            }
-        }
-
-        if self.filled == self.buffer.len() {
-            Poll::Ready(Ok(()))
-        }
-        else {
-            Poll::Ready(Err(ReadSamplesExactError::Eof {
-                num_samples_read: self.filled,
-            }))
-        }
-    }
-}
-
-/// Error returned by
-/// [`read_samples_exact`][AsyncReadSamplesExt::read_samples_exact]
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-pub enum ReadSamplesExactError<E> {
-    /// The stream ended before the buffer could be filled completely.
-    #[error("EOF after {num_samples_read} samples")]
-    Eof { num_samples_read: usize },
-
-    /// The underlying stream produced an error.
-    #[error("{0}")]
-    Other(#[from] E),
-}
-
-pin_project! {
-    /// Stream wrapper that maps the error type.
-    #[derive(Clone, Copy, Debug)]
-    pub struct MapErr<S, F> {
-        #[pin]
-        inner: S,
-        map_err: F,
-    }
-}
-
-impl<S, E, F> AsyncReadSamples for MapErr<S, F>
-where
-    S: AsyncReadSamples,
-    F: FnMut(S::Error) -> E,
-{
-    type Error = E;
-    fn poll_read_samples(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut [IqSample],
-    ) -> Poll<Result<usize, Self::Error>> {
-        let this = self.project();
-        this.inner
-            .poll_read_samples(cx, buffer)
-            .map_err(this.map_err)
-    }
-}
-
-/// Trait for IQ streams that accept configuration options.
+/// RTL-SDR backend.
 ///
 /// This is basically all the methods shared by
 /// [`RtlTcpClient`][crate::rtl_tcp::client::RtlTcpClient], and [`RtlSdr`], so
 /// that they can be used interchangeably.
-pub trait Configure {
+pub trait Backend {
     type Error;
 
     /// Set tuner frequency in Hz
     fn set_center_frequency(
-        &mut self,
+        &self,
         frequency: u32,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     /// Set sample rate in Hz
     fn set_sample_rate(
-        &mut self,
+        &self,
         sample_rate: u32,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     /// Set tuner gain, in tenths of a dB
     fn set_tuner_gain(
-        &mut self,
+        &self,
         gain: Gain,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
@@ -522,97 +400,47 @@ pub trait Configure {
     /// incoming signal, this is not automatic gain control on the hardware
     /// chip, that is controlled by tuner gain mode.
     fn set_agc_mode(
-        &mut self,
+        &self,
         enable: bool,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     fn set_frequency_correction(
-        &mut self,
+        &self,
         ppm: i32,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     fn set_tuner_if_gain(
-        &mut self,
+        &self,
         stage: i16,
         gain: i16,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     fn set_offset_tuning(
-        &mut self,
+        &self,
         enable: bool,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     fn set_rtl_xtal(
-        &mut self,
+        &self,
         frequency: u32,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     fn set_tuner_xtal(
-        &mut self,
+        &self,
         frequency: u32,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
 
     fn set_bias_tee(
-        &mut self,
+        &self,
         enable: bool,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + Sync;
-}
 
-impl<T: ?Sized + Unpin + Configure> Configure for &mut T {
-    type Error = <T as Configure>::Error;
+    fn samples(&self) -> impl Future<Output = Result<Samples<Iq>, Self::Error>> + Send + Sync;
 
-    fn set_center_frequency(
-        &mut self,
-        frequency: u32,
-    ) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_center_frequency(*self, frequency)
-    }
-
-    fn set_sample_rate(
-        &mut self,
-        sample_rate: u32,
-    ) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_sample_rate(*self, sample_rate)
-    }
-
-    fn set_tuner_gain(&mut self, gain: Gain) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_tuner_gain(*self, gain)
-    }
-
-    fn set_agc_mode(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_agc_mode(*self, enable)
-    }
-
-    fn set_frequency_correction(
-        &mut self,
-        ppm: i32,
-    ) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_frequency_correction(*self, ppm)
-    }
-
-    fn set_tuner_if_gain(
-        &mut self,
-        stage: i16,
-        gain: i16,
-    ) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_tuner_if_gain(*self, stage, gain)
-    }
-
-    fn set_offset_tuning(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_offset_tuning(*self, enable)
-    }
-
-    fn set_rtl_xtal(&mut self, frequency: u32) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_rtl_xtal(*self, frequency)
-    }
-
-    fn set_tuner_xtal(&mut self, frequency: u32) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_tuner_xtal(*self, frequency)
-    }
-
-    fn set_bias_tee(&mut self, enable: bool) -> impl Future<Output = Result<(), Self::Error>> {
-        T::set_bias_tee(*self, enable)
-    }
+    fn direct_samples(
+        &self,
+        mode: DirectSamplingMode,
+    ) -> impl Future<Output = Result<Samples<u8>, Self::Error>> + Send + Sync;
 }
 
 /// Tuner gain
@@ -647,6 +475,29 @@ pub enum DirectSamplingMode {
     I,
     /// Direct sampling of Q branch
     Q,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum SampleType {
+    #[default]
+    Iq,
+    I,
+    Q,
+}
+
+impl From<DirectSamplingMode> for SampleType {
+    fn from(value: DirectSamplingMode) -> Self {
+        match value {
+            DirectSamplingMode::I => Self::I,
+            DirectSamplingMode::Q => Self::Q,
+        }
+    }
+}
+
+impl From<Option<DirectSamplingMode>> for SampleType {
+    fn from(value: Option<DirectSamplingMode>) -> Self {
+        value.map(Into::into).unwrap_or(SampleType::Iq)
+    }
 }
 
 /// The type of tuner in a [`RtlSdr`].
