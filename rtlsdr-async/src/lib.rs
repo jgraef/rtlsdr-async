@@ -184,7 +184,7 @@ impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamplesExact<'
         }
         else {
             Poll::Ready(Err(ReadSamplesExactError::Eof {
-                num_bytes_read: self.filled,
+                num_samples_read: self.filled,
             }))
         }
     }
@@ -195,8 +195,8 @@ impl<'a, 'b, S: AsyncReadSamples + Unpin + ?Sized> Future for ReadSamplesExact<'
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum ReadSamplesExactError<E> {
     /// The stream ended before the buffer could be filled completely.
-    #[error("EOF after {num_bytes_read} bytes")]
-    Eof { num_bytes_read: usize },
+    #[error("EOF after {num_samples_read} samples")]
+    Eof { num_samples_read: usize },
 
     /// The underlying stream produced an error.
     #[error("{0}")]

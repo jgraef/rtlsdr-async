@@ -1,7 +1,6 @@
 use std::{
     ffi::{
-        CStr,
-        c_void,
+        c_char, c_int, c_void, CStr
     },
     fmt::Debug,
     pin::Pin,
@@ -114,9 +113,9 @@ impl Iterator for DeviceIter {
                 let ret = unsafe {
                     rtlsdr_sys::rtlsdr_get_device_usb_strings(
                         index,
-                        manufacturer.as_mut_ptr() as *mut i8,
-                        product.as_mut_ptr() as *mut i8,
-                        serial.as_mut_ptr() as *mut i8,
+                        manufacturer.as_mut_ptr() as *mut c_char,
+                        product.as_mut_ptr() as *mut c_char,
+                        serial.as_mut_ptr() as *mut c_char,
                     )
                 };
 
@@ -572,7 +571,7 @@ impl Handle {
     ///
     /// a quick test showed that this usually fills the whole buffer.
     fn read_sync(&self, buffer: &mut [u8]) -> Result<usize, Error> {
-        let mut n_read: i32 = 0;
+        let mut n_read = 0;
 
         let ret = unsafe {
             rtlsdr_read_sync(
@@ -582,7 +581,7 @@ impl Handle {
                     .len()
                     .try_into()
                     .expect("buffer size too large for i32"),
-                &mut n_read as *mut i32,
+                &mut n_read as *mut c_int,
             )
         };
 
