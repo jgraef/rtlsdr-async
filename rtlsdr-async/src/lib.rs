@@ -4,31 +4,292 @@
 //!
 //! [1]: https://gitea.osmocom.org/sdr/rtl-sdr
 
-mod bindings;
+mod buffer_queue;
+mod control;
+mod enumerate;
+mod handle;
+mod sampling;
+
 #[cfg(feature = "tcp")]
 pub mod rtl_tcp;
 
 use std::{
     fmt::Debug,
     pin::Pin,
+    sync::Arc,
     task::{
         Context,
         Poll,
     },
 };
 
-pub use bindings::{
-    DeviceInfo,
-    DeviceIter,
-    Error,
-    RtlSdr,
-    devices,
-};
 use bytemuck::{
     Pod,
     Zeroable,
 };
+use futures_core::Stream;
 use pin_project_lite::pin_project;
+
+pub use crate::{
+    buffer_queue::Buffer,
+    enumerate::{
+        DeviceInfo,
+        DeviceIter,
+        devices,
+    },
+};
+use crate::{
+    control::Control,
+    handle::Handle,
+    sampling::spawn_reader_thread,
+};
+
+/// default buffer size is 16 KiB
+///
+/// at 2.4 Mhz sample rate this is equivalent to ~ 6.8 ms of samples
+const DEFAULT_BUFFER_SIZE: usize = 0x4000; // 16 KiB
+
+/// default queue size
+///
+/// together with `DEFAULT_BUFFER_SIZE` this makes a total of 1 MiB of buffers,
+/// or ~436 ms of samples.
+const DEFAULT_QUEUE_SIZE: usize = 64;
+
+/// Errors returned by an [`RtlSdr`]
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum Error {
+    #[error("librtlsdr error: {function} retured {value}")]
+    LibRtlSdr { function: &'static str, value: i32 },
+    #[error("control handler thread died unexpectedly")]
+    ControlThreadDead,
+    #[error("reader handler thread died unexpectedly")]
+    ReaderThreadDead,
+    #[error("can't select gain level, because librtlsdr doesn't report any supported gain levels")]
+    NoSupportedGains,
+    #[error("unknown tuner")]
+    UnknownTuner,
+    #[error("operation not supported")]
+    Unsupported,
+    #[error("invalid gain index: {index}")]
+    InvalidGainIndex { index: usize },
+}
+
+impl Error {
+    pub(crate) fn from_lib(function: &'static str, value: i32) -> Self {
+        Self::LibRtlSdr { function, value }
+    }
+}
+
+/// An RTL-SDR.
+///
+/// This provides an async interface [`AsyncReadSamples`] to read IQ samples
+/// from the device, and several methods to configure it.
+///
+/// [`RtlSdr`] is cheaply cloneable! All copies will read from the same
+/// underlying device.
+///
+/// # Internals
+///
+/// Internally this spawns 2 threads:
+///
+/// 1. A thread that handles slow control commands like
+///    [`Self::set_center_frequency`]. There will only ever be one control
+///    thread for all devices.
+/// 2. A thread that reads IQ samples from the device. Each [`RtlSdr`] will
+///    spawn its own reader thread.
+#[derive(Debug, Clone)]
+pub struct RtlSdr {
+    control: Control,
+
+    buffer_queue_subscriber: buffer_queue::Subscriber,
+
+    // for now we'll create the receiver the first time poll_read_samples is called.
+    // eventually we want RtlSdr to have a stream method which returns a separate IqStream. This
+    // way we can also have methods that start direct sampling, which would return a different type
+    // of stream. but i'm not sure yet how we would have a unified interface with RtlTcpClient.
+    buffer_queue_reader: Option<buffer_queue::Reader>,
+}
+
+impl RtlSdr {
+    /// Open an RTL-SDR with the given index.
+    ///
+    /// You can enumerate the available devices with [`devices`].
+    pub fn open(index: u32) -> Result<Self, Error> {
+        Self::open_impl(index, DEFAULT_QUEUE_SIZE, DEFAULT_BUFFER_SIZE)
+    }
+
+    /// `buffer_size` must be somewhat carefully chosen. from the librtlsdr doc
+    /// it seems like it must be at least a multiple of 512, and should really
+    /// be a multiple of 16KiB
+    fn open_impl(index: u32, queue_size: usize, buffer_size: usize) -> Result<Self, Error> {
+        let handle = Arc::new(Handle::open(index)?);
+
+        let control = Control::new(handle.clone());
+        let buffer_queue_subscriber = spawn_reader_thread(handle, buffer_size, queue_size);
+
+        Ok(Self {
+            control,
+            buffer_queue_subscriber,
+            buffer_queue_reader: None,
+        })
+    }
+
+    pub fn get_center_frequency(&self) -> Result<u32, Error> {
+        self.control.get_center_frequency()
+    }
+
+    pub async fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
+        self.control.set_center_frequency(frequency).await
+    }
+
+    pub fn get_sample_rate(&self) -> Result<u32, Error> {
+        self.control.get_sample_rate()
+    }
+
+    pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
+        self.control.set_sample_rate(sample_rate).await
+    }
+
+    pub fn get_tuner_type(&self) -> TunerType {
+        self.control.get_tuner_type()
+    }
+
+    pub fn get_tuner_gains(&self) -> &[i32] {
+        self.control.get_tuner_gains()
+    }
+
+    pub fn get_tuner_gain(&self) -> Result<i32, Error> {
+        self.control.get_tuner_gain()
+    }
+
+    pub async fn set_tuner_gain(&self, gain: Gain) -> Result<(), Error> {
+        self.control.set_tuner_gain(gain).await
+    }
+
+    pub async fn set_tuner_if_gain(&self, stage: i32, gain: i32) -> Result<(), Error> {
+        self.control.set_tuner_if_gain(stage, gain).await
+    }
+
+    pub async fn set_tuner_bandwidth(&self, bandwidth: u32) -> Result<(), Error> {
+        self.control.set_tuner_bandwidth(bandwidth).await
+    }
+
+    pub async fn set_agc_mode(&self, enable: bool) -> Result<(), Error> {
+        self.control.set_agc_mode(enable).await
+    }
+
+    pub fn get_frequency_correction(&self) -> Result<i32, Error> {
+        self.control.get_frequency_correction()
+    }
+
+    pub async fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
+        self.control.set_frequency_correction(ppm).await
+    }
+
+    pub fn get_offset_tuning(&self) -> Result<bool, Error> {
+        self.control.get_offset_tuning()
+    }
+
+    pub async fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
+        self.control.set_offset_tuning(enable).await
+    }
+
+    pub fn get_rtl_xtal(&self) -> Result<u32, Error> {
+        self.control.get_rtl_xtal()
+    }
+
+    pub async fn set_rtl_xtal(&self, frequency: u32) -> Result<(), Error> {
+        self.control.set_rtl_xtal(frequency).await
+    }
+
+    pub fn get_tuner_xtal(&self) -> Result<u32, Error> {
+        self.control.get_tuner_xtal()
+    }
+
+    pub async fn set_tuner_xtal(&self, frequency: u32) -> Result<(), Error> {
+        self.control.set_tuner_xtal(frequency).await
+    }
+
+    pub async fn set_bias_tee(&self, enable: bool) -> Result<(), Error> {
+        self.control.set_bias_tee(enable).await
+    }
+
+    fn reader(&mut self) -> &mut buffer_queue::Reader {
+        self.buffer_queue_reader
+            .get_or_insert_with(|| self.buffer_queue_subscriber.receiver().into())
+    }
+}
+
+impl AsyncReadSamples for RtlSdr {
+    type Error = Error;
+
+    fn poll_read_samples(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut [IqSample],
+    ) -> Poll<Result<usize, Self::Error>> {
+        Pin::new(self.reader())
+            .poll_read_samples(cx, buffer)
+            .map_err(|error| match error {})
+    }
+}
+
+// this could just return the buffers without the Result, because the buffer
+// queue doesn't return errors, but for future compatibility we will make it
+// return Results.
+impl Stream for RtlSdr {
+    type Item = Result<Buffer, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.reader().receiver)
+            .poll_next(cx)
+            .map(|ready| ready.map(Ok))
+    }
+}
+
+impl Configure for RtlSdr {
+    type Error = Error;
+
+    async fn set_center_frequency(&mut self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_center_frequency(&*self, frequency).await
+    }
+
+    async fn set_sample_rate(&mut self, sample_rate: u32) -> Result<(), Error> {
+        RtlSdr::set_sample_rate(&*self, sample_rate).await
+    }
+
+    async fn set_tuner_gain(&mut self, gain: Gain) -> Result<(), Error> {
+        RtlSdr::set_tuner_gain(&*self, gain).await
+    }
+
+    async fn set_agc_mode(&mut self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_agc_mode(&*self, enable).await
+    }
+
+    async fn set_frequency_correction(&mut self, ppm: i32) -> Result<(), Error> {
+        RtlSdr::set_frequency_correction(&*self, ppm).await
+    }
+
+    async fn set_tuner_if_gain(&mut self, stage: i16, gain: i16) -> Result<(), Error> {
+        RtlSdr::set_tuner_if_gain(&*self, stage.into(), gain.into()).await
+    }
+
+    async fn set_offset_tuning(&mut self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_offset_tuning(&*self, enable).await
+    }
+
+    async fn set_rtl_xtal(&mut self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_rtl_xtal(&*self, frequency).await
+    }
+
+    async fn set_tuner_xtal(&mut self, frequency: u32) -> Result<(), Error> {
+        RtlSdr::set_tuner_xtal(&*self, frequency).await
+    }
+
+    async fn set_bias_tee(&mut self, enable: bool) -> Result<(), Error> {
+        RtlSdr::set_bias_tee(&*self, enable).await
+    }
+}
 
 /// 16 bit IQ sample
 ///
