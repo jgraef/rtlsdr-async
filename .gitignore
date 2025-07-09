@@ -15,3 +15,4 @@ Thumbs.db
 .env
 
 /rustc-ice-*
+/tmp
