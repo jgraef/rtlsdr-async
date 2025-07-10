@@ -284,14 +284,23 @@ impl Sender {
     ///
     /// If there are subscribers, but no receivers this will block until
     /// there is a receiver.
+    ///
+    /// # TODO
+    ///
+    /// Ideally we would like to have 3 methods:
+    ///
+    /// - block until receivers and swap
+    /// - await until receivers and swap
+    /// - just swap
     pub fn swap_buffers(
         &mut self,
         push_buffer: Option<Buffer>,
         buffer_size: usize,
+        block: bool,
     ) -> Option<Buffer> {
         let mut state = self.shared.state.lock();
 
-        while state.num_receivers == 0 {
+        while state.num_receivers == 0 && block {
             if state.num_subscribers == 0 {
                 return None;
             }

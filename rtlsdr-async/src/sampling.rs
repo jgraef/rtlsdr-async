@@ -46,7 +46,8 @@ fn reader_thread(
     tracing::debug!("reader thread spawned");
 
     loop {
-        let Some(mut buffer) = buffer_queue_sender.swap_buffers(push_buffer.take(), buffer_size)
+        let Some(mut buffer) =
+            buffer_queue_sender.swap_buffers(push_buffer.take(), buffer_size, true)
         else {
             // all receivers and subscribers dropped
             tracing::debug!("all readers dropped. exiting");

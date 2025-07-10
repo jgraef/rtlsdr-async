@@ -29,6 +29,8 @@ use bytemuck::{
     Zeroable,
 };
 use futures_util::Stream;
+#[cfg(feature = "num-complex")]
+use num_complex::Complex;
 
 pub use crate::enumerate::{
     DeviceInfo,
@@ -368,6 +370,22 @@ impl Default for Iq {
     fn default() -> Self {
         Self { i: 128, q: 128 }
     }
+}
+
+#[cfg(feature = "num-complex")]
+impl From<Iq> for Complex<f32> {
+    fn from(value: Iq) -> Self {
+        Self {
+            re: u8_to_f32(value.i),
+            im: u8_to_f32(value.q),
+        }
+    }
+}
+
+#[inline(always)]
+fn u8_to_f32(x: u8) -> f32 {
+    // map the special rtlsdr encoding to f32
+    (x as f32) / 255.0 * 2.0 - 1.0
 }
 
 /// RTL-SDR backend.

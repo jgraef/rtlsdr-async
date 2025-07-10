@@ -154,6 +154,9 @@ impl LockedHandle {
     }
 
     pub fn get_sample_rate(&mut self) -> Result<u32, Error> {
+        // this returns 0 if dev is NULL, but it isn't. otherwise it straight up gives
+        // us dev->rate. dev->rate might be 0 if the sample rate hasn't been set
+        // yet. so should we return a Result, Option, or just plain u32?
         let ret = unsafe { rtlsdr_sys::rtlsdr_get_sample_rate(self.handle) };
         tracing::trace!(ret, "rtlsdr_get_sample_rate");
         if ret != 0 {

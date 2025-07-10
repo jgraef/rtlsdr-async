@@ -74,7 +74,7 @@ impl RtlTcpClient {
     pub async fn connect<A: ToSocketAddrs>(address: A) -> Result<Self, Error> {
         let (connect_result_sender, connect_result_receiver) = oneshot::channel();
         let (command_sender, command_receiver) = mpsc::channel(COMMAND_QUEUE_SIZE);
-        let (buffer_queue_sender, buffer_queue_receiver) =
+        let (buffer_queue_sender, buffer_queue_subscriber) =
             buffer_queue::channel(SAMPLE_BUFFER_QUEUE_SIZE);
 
         let tcp = TcpStream::connect(address).await?;
@@ -102,7 +102,7 @@ impl RtlTcpClient {
         Ok(Self {
             dongle_info,
             command_sender,
-            buffer_queue_subscriber: buffer_queue_receiver,
+            buffer_queue_subscriber,
         })
     }
 
@@ -112,6 +112,7 @@ impl RtlTcpClient {
 
     /// Sends a command to the server.
     pub async fn send_command(&self, command: Command) -> Result<(), Error> {
+        tracing::debug!(?command, "sending command");
         let (result_sender, result_receiver) = oneshot::channel();
         self.command_sender
             .send(ControlMessage {
@@ -301,7 +302,7 @@ async fn handle_connection(
         result = forward_samples(tcp_read, buffer_queue_sender, &receiver_state, SAMPLE_BUFFER_SIZE) => result?,
     }
 
-    todo!();
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -335,10 +336,11 @@ async fn forward_commands<W: AsyncWrite + Unpin>(
     mut tcp_write: W,
     receiver_state: &Mutex<ReceiverState>,
 ) -> Result<(), Error> {
-    let mut messages = Vec::with_capacity(COMMAND_QUEUE_SIZE);
+    //let mut messages = Vec::with_capacity(COMMAND_QUEUE_SIZE);
 
     loop {
-        if command_receiver
+        tracing::debug!("waiting for control messages");
+        /*if command_receiver
             .recv_many(&mut messages, COMMAND_QUEUE_SIZE)
             .await
             == 0
@@ -346,35 +348,42 @@ async fn forward_commands<W: AsyncWrite + Unpin>(
             break;
         }
 
-        for message in messages.drain(..) {
-            match &message.command {
-                Command::SetSampleRate { sample_rate } => {
-                    let mut receiver_state = receiver_state.lock();
-                    receiver_state.sample_rate = *sample_rate;
-                }
-                Command::SetDirectSampling { mode } => {
-                    let mut receiver_state = receiver_state.lock();
-                    receiver_state.sample_type = (*mode).into();
-                }
-                _ => {}
-            }
+        for message in messages.drain(..) {*/
+        let Some(message) = command_receiver.recv().await
+        else {
+            break;
+        };
 
-            let mut buf = [0; 5];
-            message.command.encode(&mut buf[..]);
-            match tcp_write.write_all(&buf[..]).await {
-                Ok(_) => {
-                    if let Some(result_sender) = message.result_sender {
-                        let _ = result_sender.send(Ok(()));
-                    }
+        tracing::debug!(?message);
+
+        match &message.command {
+            Command::SetSampleRate { sample_rate } => {
+                let mut receiver_state = receiver_state.lock();
+                receiver_state.sample_rate = *sample_rate;
+            }
+            Command::SetDirectSampling { mode } => {
+                let mut receiver_state = receiver_state.lock();
+                receiver_state.sample_type = (*mode).into();
+            }
+            _ => {}
+        }
+
+        let mut buf = [0; 5];
+        message.command.encode(&mut buf[..]);
+        match tcp_write.write_all(&buf[..]).await {
+            Ok(_) => {
+                if let Some(result_sender) = message.result_sender {
+                    let _ = result_sender.send(Ok(()));
                 }
-                Err(error) => {
-                    if let Some(result_sender) = message.result_sender {
-                        let _ = result_sender.send(Err(error.into()));
-                    }
-                    break;
+            }
+            Err(error) => {
+                if let Some(result_sender) = message.result_sender {
+                    let _ = result_sender.send(Err(error.into()));
                 }
+                break;
             }
         }
+        //}
 
         tcp_write.flush().await?;
     }
@@ -391,7 +400,8 @@ async fn forward_samples<R: AsyncRead + Unpin>(
     let mut push_buffer = None;
 
     loop {
-        let Some(mut buffer) = buffer_queue_sender.swap_buffers(push_buffer.take(), buffer_size)
+        let Some(mut buffer) =
+            buffer_queue_sender.swap_buffers(push_buffer.take(), buffer_size, false)
         else {
             // all receivers and subscribers dropped
             tracing::debug!("all readers dropped. exiting");

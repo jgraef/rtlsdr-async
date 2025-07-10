@@ -189,7 +189,7 @@ where
     let mut is_eof = false;
 
     // fixme: this somehow sometimes? ends exits the loop when switching sampling
-    // mode
+    // mode.
     while !is_eof {
         let mut sample_stream = sample_stream.lock().await;
 
