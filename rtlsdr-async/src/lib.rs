@@ -125,16 +125,16 @@ impl RtlSdr {
         })
     }
 
-    pub fn get_center_frequency(&self) -> Result<u32, Error> {
-        self.control.get_center_frequency()
+    pub async fn get_center_frequency(&self) -> Result<u32, Error> {
+        self.control.get_center_frequency().await
     }
 
     pub async fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
         self.control.set_center_frequency(frequency).await
     }
 
-    pub fn get_sample_rate(&self) -> Result<u32, Error> {
-        self.control.get_sample_rate()
+    pub async fn get_sample_rate(&self) -> Result<u32, Error> {
+        self.control.get_sample_rate().await
     }
 
     pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
@@ -149,8 +149,8 @@ impl RtlSdr {
         self.control.get_tuner_gains()
     }
 
-    pub fn get_tuner_gain(&self) -> Result<i32, Error> {
-        self.control.get_tuner_gain()
+    pub async fn get_tuner_gain(&self) -> Result<i32, Error> {
+        self.control.get_tuner_gain().await
     }
 
     pub async fn set_tuner_gain(&self, gain: Gain) -> Result<(), Error> {
@@ -169,32 +169,32 @@ impl RtlSdr {
         self.control.set_agc_mode(enable).await
     }
 
-    pub fn get_frequency_correction(&self) -> Result<i32, Error> {
-        self.control.get_frequency_correction()
+    pub async fn get_frequency_correction(&self) -> Result<i32, Error> {
+        self.control.get_frequency_correction().await
     }
 
     pub async fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
         self.control.set_frequency_correction(ppm).await
     }
 
-    pub fn get_offset_tuning(&self) -> Result<bool, Error> {
-        self.control.get_offset_tuning()
+    pub async fn get_offset_tuning(&self) -> Result<bool, Error> {
+        self.control.get_offset_tuning().await
     }
 
     pub async fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
         self.control.set_offset_tuning(enable).await
     }
 
-    pub fn get_rtl_xtal(&self) -> Result<u32, Error> {
-        self.control.get_rtl_xtal()
+    pub async fn get_rtl_xtal(&self) -> Result<u32, Error> {
+        self.control.get_rtl_xtal().await
     }
 
     pub async fn set_rtl_xtal(&self, frequency: u32) -> Result<(), Error> {
         self.control.set_rtl_xtal(frequency).await
     }
 
-    pub fn get_tuner_xtal(&self) -> Result<u32, Error> {
-        self.control.get_tuner_xtal()
+    pub async fn get_tuner_xtal(&self) -> Result<u32, Error> {
+        self.control.get_tuner_xtal().await
     }
 
     pub async fn set_tuner_xtal(&self, frequency: u32) -> Result<(), Error> {

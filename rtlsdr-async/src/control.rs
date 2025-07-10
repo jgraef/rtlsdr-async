@@ -40,9 +40,20 @@ impl Control {
             control_queue_sender,
         }
     }
-    pub fn get_center_frequency(&self) -> Result<u32, Error> {
-        let mut handle = self.handle.lock();
-        handle.get_center_frequency()
+
+    pub async fn get_center_frequency(&self) -> Result<u32, Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::GetCenterFrequency {
+                handle: self.handle.clone(),
+                result_sender,
+                span: Span::current(),
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub async fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
@@ -61,9 +72,19 @@ impl Control {
             .map_err(|_| Error::ControlThreadDead)?
     }
 
-    pub fn get_sample_rate(&self) -> Result<u32, Error> {
-        let mut handle = self.handle.lock();
-        handle.get_sample_rate()
+    pub async fn get_sample_rate(&self) -> Result<u32, Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::GetSampleRate {
+                handle: self.handle.clone(),
+                result_sender,
+                span: Span::current(),
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
@@ -90,9 +111,19 @@ impl Control {
         self.handle.tuner_gains.as_ref()
     }
 
-    pub fn get_tuner_gain(&self) -> Result<i32, Error> {
-        let mut handle = self.handle.lock();
-        handle.get_tuner_gain()
+    pub async fn get_tuner_gain(&self) -> Result<i32, Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::GetTunerGain {
+                handle: self.handle.clone(),
+                result_sender,
+                span: Span::current(),
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub async fn set_tuner_gain(&self, gain: Gain) -> Result<(), Error> {
@@ -160,9 +191,19 @@ impl Control {
             .map_err(|_| Error::ControlThreadDead)?
     }
 
-    pub fn get_frequency_correction(&self) -> Result<i32, Error> {
-        let mut handle = self.handle.lock();
-        handle.get_frequency_correction()
+    pub async fn get_frequency_correction(&self) -> Result<i32, Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::GetFrequencyCorrection {
+                handle: self.handle.clone(),
+                result_sender,
+                span: Span::current(),
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub async fn set_frequency_correction(&self, ppm: i32) -> Result<(), Error> {
@@ -181,9 +222,19 @@ impl Control {
             .map_err(|_| Error::ControlThreadDead)?
     }
 
-    pub fn get_offset_tuning(&self) -> Result<bool, Error> {
-        let mut handle = self.handle.lock();
-        handle.get_offset_tuning()
+    pub async fn get_offset_tuning(&self) -> Result<bool, Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::GetOffsetTuning {
+                handle: self.handle.clone(),
+                result_sender,
+                span: Span::current(),
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     pub async fn set_offset_tuning(&self, enable: bool) -> Result<(), Error> {
@@ -224,10 +275,19 @@ impl Control {
             .map_err(|_| Error::ControlThreadDead)?
     }
 
-    pub fn get_rtl_xtal(&self) -> Result<u32, Error> {
-        let mut handle = self.handle.lock();
-        let (rtl_frequency, _tuner_frequency) = handle.get_xtal_frequency()?;
-        Ok(rtl_frequency)
+    async fn get_xtal_frequency(&self) -> Result<(u32, u32), Error> {
+        let (result_sender, result_receiver) = oneshot::channel();
+        self.control_queue_sender
+            .send(ControlMessage::GetXtalFrequency {
+                handle: self.handle.clone(),
+                result_sender,
+                span: Span::current(),
+            })
+            .await
+            .map_err(|_| Error::ControlThreadDead)?;
+        result_receiver
+            .await
+            .map_err(|_| Error::ControlThreadDead)?
     }
 
     async fn set_xtal_frequency(
@@ -251,13 +311,17 @@ impl Control {
             .map_err(|_| Error::ControlThreadDead)?
     }
 
+    pub async fn get_rtl_xtal(&self) -> Result<u32, Error> {
+        let (rtl_frequency, _tuner_frequency) = self.get_xtal_frequency().await?;
+        Ok(rtl_frequency)
+    }
+
     pub async fn set_rtl_xtal(&self, frequency: u32) -> Result<(), Error> {
         self.set_xtal_frequency(Some(frequency), None).await
     }
 
-    pub fn get_tuner_xtal(&self) -> Result<u32, Error> {
-        let mut handle = self.handle.lock();
-        let (_rtl_frequency, tuner_frequency) = handle.get_xtal_frequency()?;
+    pub async fn get_tuner_xtal(&self) -> Result<u32, Error> {
+        let (_rtl_frequency, tuner_frequency) = self.get_xtal_frequency().await?;
         Ok(tuner_frequency)
     }
 
@@ -363,6 +427,16 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
 
     while let Some(command) = control_queue_receiver.blocking_recv() {
         match command {
+            ControlMessage::GetCenterFrequency {
+                handle,
+                result_sender,
+                span,
+            } => {
+                let _guard = span.enter();
+                let mut handle = handle.lock();
+                let result = handle.get_center_frequency();
+                let _ = result_sender.send(result);
+            }
             ControlMessage::SetCenterFrequency {
                 handle,
                 frequency,
@@ -374,6 +448,16 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 let result = handle.set_center_frequency(frequency);
                 let _ = result_sender.send(result);
             }
+            ControlMessage::GetSampleRate {
+                handle,
+                result_sender,
+                span,
+            } => {
+                let _guard = span.enter();
+                let mut handle = handle.lock();
+                let result = handle.get_sample_rate();
+                let _ = result_sender.send(result);
+            }
             ControlMessage::SetSampleRate {
                 handle,
                 sample_rate,
@@ -383,6 +467,16 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 let _guard = span.enter();
                 let mut handle = handle.lock();
                 let result = handle.set_sample_rate(sample_rate);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::GetTunerGain {
+                handle,
+                result_sender,
+                span,
+            } => {
+                let _guard = span.enter();
+                let mut handle = handle.lock();
+                let result = handle.get_tuner_gain();
                 let _ = result_sender.send(result);
             }
             ControlMessage::SetTunerGain {
@@ -429,6 +523,16 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 let result = handle.set_agc_mode(enable);
                 let _ = result_sender.send(result);
             }
+            ControlMessage::GetFrequencyCorrection {
+                handle,
+                result_sender,
+                span,
+            } => {
+                let _guard = span.enter();
+                let mut handle = handle.lock();
+                let result = handle.get_frequency_correction();
+                let _ = result_sender.send(result);
+            }
             ControlMessage::SetFrequencyCorrection {
                 handle,
                 ppm,
@@ -440,6 +544,16 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 let result = handle.set_frequency_correction(ppm);
                 let _ = result_sender.send(result);
             }
+            ControlMessage::GetOffsetTuning {
+                handle,
+                result_sender,
+                span,
+            } => {
+                let _guard = span.enter();
+                let mut handle = handle.lock();
+                let result = handle.get_offset_tuning();
+                let _ = result_sender.send(result);
+            }
             ControlMessage::SetOffsetTuning {
                 handle,
                 enable,
@@ -449,6 +563,16 @@ fn control_thread(mut control_queue_receiver: mpsc::Receiver<ControlMessage>) {
                 let _guard = span.enter();
                 let mut handle = handle.lock();
                 let result = handle.set_offset_tuning(enable);
+                let _ = result_sender.send(result);
+            }
+            ControlMessage::GetXtalFrequency {
+                handle,
+                result_sender,
+                span,
+            } => {
+                let _guard = span.enter();
+                let mut handle = handle.lock();
+                let result = handle.get_xtal_frequency();
                 let _ = result_sender.send(result);
             }
             ControlMessage::SetXtalFrequency {
@@ -512,16 +636,31 @@ fn get_control_queue_sender() -> mpsc::Sender<ControlMessage> {
 }
 
 enum ControlMessage {
+    GetCenterFrequency {
+        handle: Arc<Handle>,
+        result_sender: oneshot::Sender<Result<u32, Error>>,
+        span: Span,
+    },
     SetCenterFrequency {
         handle: Arc<Handle>,
         frequency: u32,
         result_sender: oneshot::Sender<Result<(), Error>>,
         span: Span,
     },
+    GetSampleRate {
+        handle: Arc<Handle>,
+        result_sender: oneshot::Sender<Result<u32, Error>>,
+        span: Span,
+    },
     SetSampleRate {
         handle: Arc<Handle>,
         sample_rate: u32,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Span,
+    },
+    GetTunerGain {
+        handle: Arc<Handle>,
+        result_sender: oneshot::Sender<Result<i32, Error>>,
         span: Span,
     },
     SetTunerGain {
@@ -549,16 +688,31 @@ enum ControlMessage {
         result_sender: oneshot::Sender<Result<(), Error>>,
         span: Span,
     },
+    GetFrequencyCorrection {
+        handle: Arc<Handle>,
+        result_sender: oneshot::Sender<Result<i32, Error>>,
+        span: Span,
+    },
     SetFrequencyCorrection {
         handle: Arc<Handle>,
         ppm: i32,
         result_sender: oneshot::Sender<Result<(), Error>>,
         span: Span,
     },
+    GetOffsetTuning {
+        handle: Arc<Handle>,
+        result_sender: oneshot::Sender<Result<bool, Error>>,
+        span: Span,
+    },
     SetOffsetTuning {
         handle: Arc<Handle>,
         enable: bool,
         result_sender: oneshot::Sender<Result<(), Error>>,
+        span: Span,
+    },
+    GetXtalFrequency {
+        handle: Arc<Handle>,
+        result_sender: oneshot::Sender<Result<(u32, u32), Error>>,
         span: Span,
     },
     SetXtalFrequency {

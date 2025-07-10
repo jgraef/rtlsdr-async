@@ -5,7 +5,6 @@ use std::{
     },
     fmt::Debug,
     ops::DerefMut,
-    pin::Pin,
     sync::Arc,
     task::{
         Context,
@@ -14,13 +13,11 @@ use std::{
     },
 };
 
-use bytes::BufMut;
 use futures_util::Stream;
 use parking_lot::{
     Condvar,
     Mutex,
 };
-use tokio::io::AsyncRead;
 
 use crate::SampleType;
 
@@ -260,90 +257,6 @@ impl Stream for Receiver {
             state.wakers.insert(this.receiver_id, cx.waker().clone());
             Poll::Pending
         }
-    }
-}
-
-/// Wraps a [`Reader`] and provides an [`AsyncReadSamples`] interface.
-#[derive(Clone, Debug)]
-pub struct Reader {
-    /// receiver for the buffer broadcast queue.
-    pub receiver: Receiver,
-
-    /// the buffer if we currently have one. this must be read first, before
-    /// fetching a new one from the queue
-    buffer: Option<Buffer>,
-
-    // read position in buffer
-    buffer_pos: usize,
-}
-
-impl From<Receiver> for Reader {
-    fn from(value: Receiver) -> Self {
-        Self {
-            receiver: value,
-            buffer: None,
-            buffer_pos: 0,
-        }
-    }
-}
-
-impl AsyncRead for Reader {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        loop {
-            let this = self.deref_mut();
-
-            if let Some(buffer_in) = &this.buffer {
-                let buffer_in = buffer_in.filled();
-
-                assert!(this.buffer_pos < buffer_in.len());
-
-                if !buf.has_remaining_mut() {
-                    return Poll::Ready(Ok(()));
-                }
-
-                let copy_amount = buf.remaining().min(buffer_in.len() - this.buffer_pos);
-
-                buf.put_slice(&buffer_in[this.buffer_pos..][..copy_amount]);
-
-                this.buffer_pos += copy_amount;
-
-                if this.buffer_pos == buffer_in.len() {
-                    this.buffer_pos = 0;
-                    this.buffer = None;
-                }
-
-                if buf.has_remaining_mut() {
-                    break;
-                }
-            }
-            else {
-                assert_eq!(this.buffer_pos, 0);
-                assert!(this.buffer.is_none());
-
-                match Pin::new(&mut this.receiver).poll_next(cx) {
-                    Poll::Pending => {
-                        if buf.filled().is_empty() {
-                            return Poll::Pending;
-                        }
-                        else {
-                            break;
-                        }
-                    }
-                    Poll::Ready(None) => {
-                        break;
-                    }
-                    Poll::Ready(Some(buffer)) => {
-                        this.buffer = Some(buffer);
-                    }
-                }
-            }
-        }
-
-        Poll::Ready(Ok(()))
     }
 }
 

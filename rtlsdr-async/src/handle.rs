@@ -374,6 +374,12 @@ impl LockedHandle {
     }
 
     pub fn set_direct_sampling(&mut self, mode: Option<DirectSamplingMode>) -> Result<(), Error> {
+        // librtlsdr doesn't do this
+        let current = self.get_direct_sampling()?;
+        if current == mode {
+            return Ok(());
+        }
+
         let mode_value = match mode {
             None => 0,
             Some(DirectSamplingMode::I) => 1,

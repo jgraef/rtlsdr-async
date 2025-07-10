@@ -186,34 +186,39 @@ async fn forward_streams<'a, W>(
 where
     W: AsyncWrite + Unpin,
 {
-    loop {
+    let mut is_eof = false;
+
+    // fixme: this somehow sometimes? ends exits the loop when switching sampling
+    // mode
+    while !is_eof {
         let mut sample_stream = sample_stream.lock().await;
 
-        match &mut *sample_stream {
-            SampleStream::Iq(samples) => {
-                forward_samples(&mut writer, samples).await?;
-            }
-            SampleStream::Direct(samples) => {
-                forward_samples(&mut writer, samples).await?;
-            }
-        }
+        is_eof = match &mut *sample_stream {
+            SampleStream::Iq { stream } => forward_samples(&mut writer, stream).await?,
+            SampleStream::Direct { stream, .. } => forward_samples(&mut writer, stream).await?,
+        };
     }
+
+    Ok(())
 }
 
-async fn forward_samples<W, S>(mut writer: W, samples: &mut Samples<S>) -> Result<(), Error>
+async fn forward_samples<W, S>(mut writer: W, samples: &mut Samples<S>) -> Result<bool, Error>
 where
     W: AsyncWrite + Unpin,
     S: Pod,
 {
-    while let Some(chunk) = samples
+    if let Some(chunk) = samples
         .try_next()
         .await
         .map_err(|error| Error::Backend(Box::new(error)))?
     {
         writer.write_all(chunk.as_bytes()).await?;
+        writer.flush().await?;
+        Ok(false)
     }
-
-    Ok(())
+    else {
+        Ok(true)
+    }
 }
 
 async fn handle_client_commands<'a, R, B>(
@@ -243,17 +248,8 @@ where
                 // we'll create a new stream from the backend and send it over to the
                 // sample-forwarding future. switching sampling mode will
                 if let Command::SetDirectSampling { mode } = &command {
-                    match SampleStream::new(&backend, *mode).await {
-                        Ok(new_sample_stream) => {
-                            *sample_stream.lock().await = new_sample_stream;
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                ?command,
-                                ?error,
-                                "error while creating new sample stream"
-                            );
-                        }
+                    if let Err(error) = sample_stream.lock().await.switch(&backend, *mode).await {
+                        tracing::warn!(?command, ?error, "error while creating new sample stream");
                     }
                 }
                 else {
@@ -273,8 +269,13 @@ where
 
 #[derive(Debug)]
 enum SampleStream {
-    Iq(Samples<Iq>),
-    Direct(Samples<u8>),
+    Iq {
+        stream: Samples<Iq>,
+    },
+    Direct {
+        stream: Samples<u8>,
+        direct_sampling_mode: DirectSamplingMode,
+    },
 }
 
 impl SampleStream {
@@ -287,20 +288,49 @@ impl SampleStream {
         <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
     {
         if let Some(direct_sampling_mode) = direct_sampling_mode {
-            Ok(Self::Direct(
-                backend
+            Ok(Self::Direct {
+                stream: backend
                     .direct_samples(direct_sampling_mode)
                     .await
                     .map_err(|error| Error::Backend(Box::new(error)))?,
-            ))
+                direct_sampling_mode,
+            })
         }
         else {
-            Ok(Self::Iq(
-                backend
+            Ok(Self::Iq {
+                stream: backend
                     .samples()
                     .await
                     .map_err(|error| Error::Backend(Box::new(error)))?,
-            ))
+            })
         }
+    }
+
+    async fn switch<B>(
+        &mut self,
+        backend: &B,
+        direct_sampling_mode: Option<DirectSamplingMode>,
+    ) -> Result<(), Error>
+    where
+        B: Backend + Send + Unpin + 'static,
+        <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let do_switch = match (&self, direct_sampling_mode) {
+            (Self::Iq { .. }, None) => false,
+            (
+                Self::Direct {
+                    direct_sampling_mode,
+                    ..
+                },
+                Some(new_direct_sampling_mode),
+            ) if *direct_sampling_mode == new_direct_sampling_mode => false,
+            _ => true,
+        };
+
+        if do_switch {
+            *self = Self::new(backend, direct_sampling_mode).await?;
+            tracing::debug!(?direct_sampling_mode, "switched to different sampling mode");
+        }
+        Ok(())
     }
 }
