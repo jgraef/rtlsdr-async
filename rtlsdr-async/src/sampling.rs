@@ -90,7 +90,8 @@ fn read_to_buffer(handle: &Handle, buffer: &mut Buffer, buffer_size: usize) -> R
             n_read & 1 == 0,
             "not an even amount of bytes ({n_read}) :sobbing: open an issue and i will fix this, but i thought this would never happen",
         );
-        buffer.filled = n_read;
+        buffer.start = 0;
+        buffer.end = n_read;
         Ok(true)
     }
     else {

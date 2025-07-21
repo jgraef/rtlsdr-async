@@ -16,7 +16,6 @@ use crate::{
     DirectSamplingMode,
     Gain,
     TunerGainMode,
-    TunerType,
 };
 
 pub mod client;
@@ -272,16 +271,6 @@ impl Command {
 pub struct InvalidCommand {
     pub command: u8,
     pub arguments: [u8; 4],
-}
-
-/// Information about the SDR dongle that is sent by the server.
-#[derive(Clone, Copy, Debug)]
-pub struct DongleInfo {
-    /// Tuner type as reported by librtlsdr
-    pub tuner_type: TunerType,
-
-    /// Number of gain levels supported by the tuner.
-    pub tuner_gain_count: u32,
 }
 
 /// Header length in bytes.

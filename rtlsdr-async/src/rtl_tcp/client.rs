@@ -24,6 +24,7 @@ use tokio::{
 use crate::{
     Backend,
     DirectSamplingMode,
+    DongleInfo,
     Gain,
     Iq,
     SampleType,
@@ -33,7 +34,6 @@ use crate::{
     rtl_tcp::{
         BufReadBytesExt,
         Command,
-        DongleInfo,
         HEADER_LENGTH,
         MAGIC,
         TunerGainMode,
@@ -219,6 +219,10 @@ impl RtlTcpClient {
 
 impl Backend for RtlTcpClient {
     type Error = Error;
+
+    fn dongle_info(&self) -> DongleInfo {
+        self.dongle_info
+    }
 
     async fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
         RtlTcpClient::set_center_frequency(self, frequency).await
@@ -413,7 +417,7 @@ async fn forward_samples<R: AsyncRead + Unpin>(
             Ok(n_read) => {
                 assert_eq!(n_read, buffer_mut.len());
 
-                buffer.filled = n_read;
+                buffer.end = n_read;
 
                 let receiver_state = receiver_state.lock();
                 buffer.sample_rate = receiver_state.sample_rate;

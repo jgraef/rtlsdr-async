@@ -1,52 +1,54 @@
 use std::{
     fmt::Debug,
-    pin::pin,
+    net::SocketAddr,
 };
 
-use bytemuck::Pod;
-use bytes::BufMut;
+use bytes::{
+    BufMut,
+    buf::UninitSlice,
+};
 use futures_util::TryStreamExt;
 use tokio::{
     io::{
-        AsyncRead,
         AsyncReadExt,
         AsyncWrite,
         AsyncWriteExt,
         BufReader,
+        BufWriter,
     },
     net::{
         TcpListener,
         TcpStream,
     },
-    sync::Mutex,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::{
     Backend,
-    DirectSamplingMode,
+    Chunk,
+    DongleInfo,
     Iq,
     RtlSdr,
     Samples,
     rtl_tcp::{
         COMMAND_LENGTH,
         Command,
-        DongleInfo,
-        HEADER_LENGTH,
-        MAGIC,
+        InvalidCommand,
     },
 };
 
 /// Server errors
 #[derive(Debug, thiserror::Error)]
 #[error("rtl_tcp server error")]
-pub enum Error {
+pub enum Error<H> {
     Io(#[from] std::io::Error),
 
     /// Error from the underlying stream, e.g. the rtlsdr device, or another
     /// `rtl_tcp`` client.
-    Backend(Box<dyn std::error::Error + Send + Sync + 'static>),
+    Handler(H),
+
+    InvalidCommand(#[from] InvalidCommand),
 }
 
 /// A `rtl_tcp` server.
@@ -58,18 +60,16 @@ pub enum Error {
 /// anything that implements the [`AsyncReadSamples`] and [`Configure`] traits,
 /// e.g. a [`RtlTcpClient`][crate::rtl_tcp::client::RtlTcpClient]
 #[derive(Debug)]
-pub struct RtlTcpServer<B> {
-    backend: B,
-    dongle_info: DongleInfo,
+pub struct RtlTcpServer<H> {
+    handler: H,
     tcp_listener: TcpListener,
     shutdown: CancellationToken,
 }
 
-impl<B> RtlTcpServer<B> {
-    pub fn new(backend: B, tcp_listener: TcpListener, dongle_info: DongleInfo) -> Self {
+impl<H> RtlTcpServer<H> {
+    pub fn new(handler: H, tcp_listener: TcpListener) -> Self {
         Self {
-            backend,
-            dongle_info,
+            handler,
             tcp_listener,
             shutdown: CancellationToken::new(),
         }
@@ -83,254 +83,359 @@ impl<B> RtlTcpServer<B> {
     }
 }
 
-impl RtlTcpServer<RtlSdr> {
-    /// This will populate a [`DongleInfo`] and call [`RtlTcpServer::new`] with
-    /// it.
-    pub fn from_rtl_sdr(rtl_sdr: RtlSdr, tcp_listener: TcpListener) -> Self {
-        let dongle_info = DongleInfo {
-            tuner_type: rtl_sdr.get_tuner_type(),
-            tuner_gain_count: rtl_sdr
-                .get_tuner_gains()
-                .len()
-                .try_into()
-                .expect("number of tuner gains doesn't fit into an u32"),
-        };
-        Self::new(rtl_sdr, tcp_listener, dongle_info)
+impl<B: Backend> RtlTcpServer<BackendHandler<B>> {
+    pub fn from_backend(backend: B, tcp_listener: TcpListener) -> Self {
+        Self::new(BackendHandler::new(backend), tcp_listener)
     }
 }
 
-impl<B> RtlTcpServer<B>
+impl RtlTcpServer<BackendHandler<RtlSdr>> {
+    /// This will populate a [`DongleInfo`] and call [`RtlTcpServer::new`] with
+    /// it.
+    pub fn from_rtl_sdr(rtl_sdr: RtlSdr, tcp_listener: TcpListener) -> Self {
+        Self::from_backend(rtl_sdr, tcp_listener)
+    }
+}
+
+impl<H> RtlTcpServer<H>
 where
-    B: Clone + Backend + Send + Sync + Unpin + 'static,
-    <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
+    H: Handler,
 {
     /// Serve incoming connections
-    pub async fn serve(self) -> Result<(), Error> {
+    pub async fn serve(mut self) -> Result<(), Error<H::Error>> {
         tracing::debug!("waiting for connections");
 
         loop {
             tokio::select! {
                 _ = self.shutdown.cancelled() => break,
                 result = self.tcp_listener.accept() => {
+
+
                     let (connection, address) = result?;
-                    let shutdown = self.shutdown.clone();
-                    let backend = self.backend.clone();
-                    let dongle_info = self.dongle_info;
-                    let span = tracing::info_span!("connection", %address);
-                    tokio::spawn(
-                        async move {
-                            tracing::debug!(%address, "new connection");
-                            if let Err(error) = handle_client(connection, shutdown, backend, dongle_info ).await {
-                                tracing::error!(?error);
-                            }
-                            tracing::debug!(%address, "closing connection");
-                        }.instrument(span)
-                    );
+                    if let Err(error) = self.handle_accept(connection, address).await {
+                        tracing::error!(?error);
+                    }
                 }
             }
         }
 
         Ok(())
     }
-}
 
-/// size of the read buffer: 1 KiB, plenty for a few command
-const READ_BUFFER_SIZE: usize = 0x400;
+    async fn handle_accept(
+        &mut self,
+        connection: TcpStream,
+        address: SocketAddr,
+    ) -> Result<(), Error<H::Error>> {
+        let shutdown = self.shutdown.clone();
 
-/// size of the write buffer: 8 KiB
-const WRITE_BUFFER_SIZE: usize = 0x2000;
+        if let Some(handler) = self
+            .handler
+            .accept_connection(address)
+            .await
+            .map_err(Error::Handler)?
+        {
+            let span = tracing::info_span!("connection", %address);
 
-async fn handle_client<B>(
-    mut tcp: TcpStream,
-    shutdown: CancellationToken,
-    backend: B,
-    dongle_info: DongleInfo,
-) -> Result<(), Error>
-where
-    B: Backend + Send + Unpin + Clone + 'static,
-    <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
-{
-    let mut write_buffer = vec![0u8; WRITE_BUFFER_SIZE];
-
-    {
-        let mut header_buffer = &mut write_buffer[..HEADER_LENGTH];
-        header_buffer.put(&MAGIC[..]);
-        header_buffer.put_u32(dongle_info.tuner_type.0);
-        header_buffer.put_u32(dongle_info.tuner_gain_count);
-    }
-    tcp.write_all(&write_buffer[..HEADER_LENGTH]).await?;
-    tcp.flush().await?;
-
-    let (tcp_read, tcp_write) = tcp.split();
-
-    let sample_stream = Mutex::new(SampleStream::new(&backend, None).await?);
-
-    // we only buffer the read half, since we only write in batches anyway.
-    let tcp_read = BufReader::with_capacity(READ_BUFFER_SIZE, tcp_read);
-    let handle_client_commands = pin!(handle_client_commands(tcp_read, backend, &sample_stream,));
-    let forward_samples = pin!(forward_streams(tcp_write, &sample_stream));
-
-    tokio::select! {
-        _ = shutdown.cancelled() => {},
-        result = handle_client_commands => result?,
-        result = forward_samples => result?,
-    }
-
-    Ok(())
-}
-
-async fn forward_streams<'a, W>(
-    mut writer: W,
-    sample_stream: &Mutex<SampleStream>,
-) -> Result<(), Error>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut is_eof = false;
-
-    // fixme: this somehow sometimes? ends exits the loop when switching sampling
-    // mode.
-    while !is_eof {
-        let mut sample_stream = sample_stream.lock().await;
-
-        is_eof = match &mut *sample_stream {
-            SampleStream::Iq { stream } => forward_samples(&mut writer, stream).await?,
-            SampleStream::Direct { stream, .. } => forward_samples(&mut writer, stream).await?,
-        };
-    }
-
-    Ok(())
-}
-
-async fn forward_samples<W, S>(mut writer: W, samples: &mut Samples<S>) -> Result<bool, Error>
-where
-    W: AsyncWrite + Unpin,
-    S: Pod,
-{
-    if let Some(chunk) = samples
-        .try_next()
-        .await
-        .map_err(|error| Error::Backend(Box::new(error)))?
-    {
-        writer.write_all(chunk.as_bytes()).await?;
-        writer.flush().await?;
-        Ok(false)
-    }
-    else {
-        Ok(true)
-    }
-}
-
-async fn handle_client_commands<'a, R, B>(
-    mut tcp_read: R,
-    backend: B,
-    sample_stream: &Mutex<SampleStream>,
-) -> Result<(), std::io::Error>
-where
-    R: AsyncRead + Unpin,
-    B: Backend + Send + Unpin + 'static,
-    <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
-{
-    let mut read_buffer = [0u8; COMMAND_LENGTH];
-
-    loop {
-        if let Err(error) = tcp_read.read_exact(&mut read_buffer[..]).await {
-            if error.kind() == std::io::ErrorKind::UnexpectedEof {
-                break;
-            }
+            tokio::spawn(
+                async move {
+                    tracing::debug!(%address, "new connection");
+                    if let Err(error) = handle_connection(connection, shutdown, handler).await {
+                        tracing::error!(?error);
+                    }
+                    tracing::debug!(%address, "closing connection");
+                }
+                .instrument(span),
+            );
         }
 
-        match Command::decode(&read_buffer[..]) {
-            Ok(command) => {
-                tracing::debug!(?command);
+        Ok(())
+    }
+}
 
-                // we have to handle this separately, as Command::apply can't really apply it.
-                // we'll create a new stream from the backend and send it over to the
-                // sample-forwarding future. switching sampling mode will
-                if let Command::SetDirectSampling { mode } = &command {
-                    if let Err(error) = sample_stream.lock().await.switch(&backend, *mode).await {
-                        tracing::warn!(?command, ?error, "error while creating new sample stream");
-                    }
-                }
-                else {
-                    if let Err(error) = command.apply(&backend).await {
-                        tracing::warn!(?command, ?error, "error while handling command");
-                    }
-                }
-            }
-            Err(command) => {
-                tracing::warn!(?command, "invalid command");
-            }
-        }
+#[derive(Debug, Default)]
+struct CommandBuffer {
+    data: [u8; COMMAND_LENGTH],
+    filled: usize,
+}
+
+impl CommandBuffer {
+    pub fn is_full(&self) -> bool {
+        self.filled == COMMAND_LENGTH
     }
 
-    Ok(())
+    pub fn reset(&mut self) {
+        self.filled = 0;
+    }
+
+    pub fn try_decode(&mut self) -> Result<Option<Command>, InvalidCommand> {
+        if self.is_full() {
+            let command = Command::decode(&self.data[..])?;
+            self.reset();
+            Ok(Some(command))
+        }
+        else {
+            Ok(None)
+        }
+    }
+}
+
+unsafe impl BufMut for CommandBuffer {
+    fn remaining_mut(&self) -> usize {
+        COMMAND_LENGTH - self.filled
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.filled += cnt;
+        assert!(self.filled <= COMMAND_LENGTH);
+    }
+
+    fn chunk_mut(&mut self) -> &mut UninitSlice {
+        UninitSlice::new(&mut self.data[self.filled..])
+    }
 }
 
 #[derive(Debug)]
-enum SampleStream {
-    Iq {
-        stream: Samples<Iq>,
-    },
-    Direct {
-        stream: Samples<u8>,
-        direct_sampling_mode: DirectSamplingMode,
-    },
+struct SampleBuffer {
+    samples: Vec<Iq>,
+    write_pos: usize,
+    read_pos: usize,
 }
 
-impl SampleStream {
-    async fn new<B: Backend>(
-        backend: &B,
-        direct_sampling_mode: Option<DirectSamplingMode>,
-    ) -> Result<Self, Error>
-    where
-        B: Backend + Send + Unpin + 'static,
-        <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
-    {
-        if let Some(direct_sampling_mode) = direct_sampling_mode {
-            Ok(Self::Direct {
-                stream: backend
-                    .direct_samples(direct_sampling_mode)
-                    .await
-                    .map_err(|error| Error::Backend(Box::new(error)))?,
-                direct_sampling_mode,
-            })
-        }
-        else {
-            Ok(Self::Iq {
-                stream: backend
-                    .samples()
-                    .await
-                    .map_err(|error| Error::Backend(Box::new(error)))?,
-            })
+impl SampleBuffer {
+    const DEFAULT_CAPACITY: usize = 0x4000;
+
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            samples: vec![Default::default(); capacity],
+            write_pos: 0,
+            read_pos: 0,
         }
     }
 
-    async fn switch<B>(
-        &mut self,
-        backend: &B,
-        direct_sampling_mode: Option<DirectSamplingMode>,
-    ) -> Result<(), Error>
-    where
-        B: Backend + Send + Unpin + 'static,
-        <B as Backend>::Error: std::error::Error + Send + Sync + 'static,
-    {
-        let do_switch = match (&self, direct_sampling_mode) {
-            (Self::Iq { .. }, None) => false,
-            (
-                Self::Direct {
-                    direct_sampling_mode,
-                    ..
-                },
-                Some(new_direct_sampling_mode),
-            ) if *direct_sampling_mode == new_direct_sampling_mode => false,
-            _ => true,
-        };
+    pub fn can_read(&self) -> bool {
+        self.read_pos < self.write_pos
+    }
 
-        if do_switch {
-            *self = Self::new(backend, direct_sampling_mode).await?;
-            tracing::debug!(?direct_sampling_mode, "switched to different sampling mode");
+    pub fn read_buffer(&self) -> &[u8] {
+        bytemuck::cast_slice(&self.samples[self.read_pos..self.write_pos])
+    }
+
+    pub fn confirm_read(&mut self, num_bytes: usize) {
+        self.read_pos += num_bytes * std::mem::size_of::<Iq>();
+        assert!(self.read_pos <= self.write_pos);
+    }
+
+    pub fn can_write(&self) -> bool {
+        self.write_pos == 0
+    }
+
+    pub fn write_buffer(&mut self) -> &mut [Iq] {
+        &mut self.samples[self.read_pos..]
+    }
+
+    pub fn confirm_write(&mut self, num_samples: usize) {
+        self.write_pos += num_samples;
+        assert!(self.write_pos <= self.samples.len());
+    }
+}
+
+impl Default for SampleBuffer {
+    fn default() -> Self {
+        Self::new(Self::DEFAULT_CAPACITY)
+    }
+}
+
+async fn handle_connection<H>(
+    mut connection: TcpStream,
+    shutdown: CancellationToken,
+    mut handler: H,
+) -> Result<(), Error<H::Error>>
+where
+    H: ConnectionHandler,
+{
+    let mut command_buffer = CommandBuffer::default();
+    let mut sample_buffer = SampleBuffer::default();
+
+    let (tcp_read, tcp_write) = connection.split();
+    let mut tcp_read = BufReader::new(tcp_read);
+    let mut tcp_write = BufWriter::new(tcp_write);
+
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                break;
+            }
+            result = tcp_read.read_buf(&mut command_buffer) => {
+                if result? == 0 {
+                    break;
+                }
+                if let Some(command) = command_buffer.try_decode()? {
+                    handler.handle_command(command).await.map_err(Error::Handler)?;
+                }
+            }
+            result = forward_samples(&mut sample_buffer, &mut handler, &mut tcp_write) => {
+                result?;
+            }
         }
-        Ok(())
+    }
+
+    Ok(())
+}
+
+async fn forward_samples<H, W>(
+    sample_buffer: &mut SampleBuffer,
+    handler: &mut H,
+    mut tcp_write: W,
+) -> Result<bool, Error<H::Error>>
+where
+    H: ConnectionHandler,
+    W: AsyncWrite + Unpin,
+{
+    if sample_buffer.can_write() {
+        let num_samples = handler
+            .read_samples(sample_buffer.write_buffer())
+            .await
+            .map_err(Error::Handler)?;
+        if num_samples == 0 {
+            return Ok(true);
+        }
+        sample_buffer.confirm_write(num_samples);
+    }
+    else if sample_buffer.can_read() {
+        let num_bytes = tcp_write.write(sample_buffer.read_buffer()).await?;
+        if num_bytes == 0 {
+            return Ok(true);
+        }
+        sample_buffer.confirm_read(num_bytes);
+    }
+    else {
+        unreachable!(
+            "either we should be able to read samples into the buffer or write them out to the stream"
+        );
+    }
+
+    Ok(false)
+}
+
+pub trait Handler {
+    type Error: std::error::Error + Send;
+    type ConnectionHandler: ConnectionHandler<Error = Self::Error>;
+
+    fn accept_connection(
+        &mut self,
+        address: SocketAddr,
+    ) -> impl Future<Output = Result<Option<Self::ConnectionHandler>, Self::Error>>;
+}
+
+pub trait ConnectionHandler: Send + 'static {
+    type Error: std::error::Error + Send;
+
+    fn dongle_info(&self) -> DongleInfo;
+
+    fn handle_command(
+        &mut self,
+        command: Command,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    fn read_samples(
+        &mut self,
+        buffer: &mut [Iq],
+    ) -> impl Future<Output = Result<usize, Self::Error>> + Send;
+}
+
+#[derive(Clone, Debug)]
+pub struct BackendHandler<B> {
+    backend: B,
+}
+
+impl<B> BackendHandler<B> {
+    pub fn new(backend: B) -> Self {
+        Self { backend }
+    }
+}
+
+impl<B> Handler for BackendHandler<B>
+where
+    B: Backend + Clone + Send + Sync + Unpin + 'static,
+{
+    type Error = B::Error;
+    type ConnectionHandler = BackendConnectionHandler<B>;
+
+    async fn accept_connection(
+        &mut self,
+        _address: SocketAddr,
+    ) -> Result<Option<Self::ConnectionHandler>, Self::Error> {
+        Ok(Some(
+            BackendConnectionHandler::new(self.backend.clone()).await?,
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BackendConnectionHandler<B> {
+    backend: B,
+    samples: Samples<Iq>,
+    chunk: Option<Chunk<Iq>>,
+}
+
+impl<B> BackendConnectionHandler<B>
+where
+    B: Backend,
+{
+    pub async fn new(backend: B) -> Result<Self, B::Error> {
+        let samples = backend.samples().await?;
+        Ok(Self {
+            backend,
+            samples,
+            chunk: None,
+        })
+    }
+}
+
+impl<B> ConnectionHandler for BackendConnectionHandler<B>
+where
+    B: Backend + Unpin + Send + Sync + 'static,
+{
+    type Error = B::Error;
+
+    fn dongle_info(&self) -> DongleInfo {
+        self.backend.dongle_info()
+    }
+
+    async fn handle_command(&mut self, command: Command) -> Result<(), Self::Error> {
+        command.apply(&self.backend).await
+    }
+
+    async fn read_samples(&mut self, buffer: &mut [Iq]) -> Result<usize, Self::Error> {
+        loop {
+            if let Some(chunk) = &mut self.chunk {
+                let n = buffer.len().min(chunk.len());
+                buffer[..n].copy_from_slice(&chunk.samples()[..n]);
+                chunk.slice(n..);
+                if chunk.is_empty() {
+                    self.chunk = None;
+                }
+                return Ok(n);
+            }
+            else {
+                if let Some(chunk) = self.samples.try_next().await.map_err(|_| todo!())? {
+                    self.chunk = Some(chunk);
+                }
+                else {
+                    return Ok(0);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Iq;
+
+    #[test]
+    fn size_of_iq_is_what_we_expect() {
+        assert_eq!(std::mem::size_of::<Iq>(), 2);
     }
 }

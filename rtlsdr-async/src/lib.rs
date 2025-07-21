@@ -16,6 +16,10 @@ pub mod rtl_tcp;
 use std::{
     fmt::Debug,
     marker::PhantomData,
+    ops::{
+        Bound,
+        RangeBounds,
+    },
     pin::Pin,
     sync::Arc,
     task::{
@@ -139,6 +143,10 @@ impl RtlSdr {
         self.control.get_sample_rate().await
     }
 
+    /// Valid sample rates are([source][1]):
+    ///
+    /// - from 225_001 Hz upto 300_000 Hz
+    /// - from 900_001 Hz upto 3_200_000 Hz
     pub async fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
         self.control.set_sample_rate(sample_rate).await
     }
@@ -228,6 +236,17 @@ impl RtlSdr {
 
 impl Backend for RtlSdr {
     type Error = Error;
+
+    fn dongle_info(&self) -> DongleInfo {
+        DongleInfo {
+            tuner_type: self.get_tuner_type(),
+            tuner_gain_count: self
+                .get_tuner_gains()
+                .len()
+                .try_into()
+                .expect("number of tuner gains doesn't fit into an u32"),
+        }
+    }
 
     async fn set_center_frequency(&self, frequency: u32) -> Result<(), Error> {
         RtlSdr::set_center_frequency(self, frequency).await
@@ -322,27 +341,66 @@ pub struct Chunk<T> {
 }
 
 impl<T: Pod> Chunk<T> {
-    #[inline(always)]
+    #[inline]
     pub fn samples(&self) -> &[T] {
         bytemuck::cast_slice(self.buffer.filled())
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.samples().iter()
     }
 }
 
 impl<T> Chunk<T> {
-    #[inline(always)]
+    #[inline]
     pub fn sample_rate(&self) -> u32 {
         self.buffer.sample_rate
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         self.buffer.filled()
     }
+
+    #[inline]
+    pub fn slice(&mut self, range: impl RangeBounds<usize>) {
+        let width = size_of::<T>();
+        self.buffer.slice(map_bounds(range, |x| x * width))
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+}
+
+#[inline]
+fn map_bound<T, U, F>(bound: Bound<T>, f: F) -> Bound<U>
+where
+    F: FnOnce(T) -> U,
+{
+    match bound {
+        Bound::Included(bound) => Bound::Included(f(bound)),
+        Bound::Excluded(bound) => Bound::Excluded(f(bound)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+#[inline]
+fn map_bounds<T, U, F>(bounds: impl RangeBounds<T>, mut f: F) -> (Bound<U>, Bound<U>)
+where
+    F: FnMut(&T) -> U,
+{
+    (
+        map_bound(bounds.start_bound().clone(), &mut f),
+        map_bound(bounds.end_bound().clone(), &mut f),
+    )
 }
 
 impl<T: Pod> AsRef<[T]> for Chunk<T> {
@@ -382,7 +440,7 @@ impl From<Iq> for Complex<f32> {
     }
 }
 
-#[inline(always)]
+#[inline]
 fn u8_to_f32(x: u8) -> f32 {
     // map the special rtlsdr encoding to f32
     (x as f32) / 255.0 * 2.0 - 1.0
@@ -394,7 +452,9 @@ fn u8_to_f32(x: u8) -> f32 {
 /// [`RtlTcpClient`][crate::rtl_tcp::client::RtlTcpClient], and [`RtlSdr`], so
 /// that they can be used interchangeably.
 pub trait Backend {
-    type Error;
+    type Error: std::error::Error + Send;
+
+    fn dongle_info(&self) -> DongleInfo;
 
     /// Set tuner frequency in Hz
     fn set_center_frequency(
@@ -551,4 +611,14 @@ impl Debug for TunerType {
             _ => write!(f, "TunerType({})", self.0),
         }
     }
+}
+
+/// Information about the SDR dongle that is sent by the server.
+#[derive(Clone, Copy, Debug)]
+pub struct DongleInfo {
+    /// Tuner type as reported by librtlsdr
+    pub tuner_type: TunerType,
+
+    /// Number of gain levels supported by the tuner.
+    pub tuner_gain_count: u32,
 }

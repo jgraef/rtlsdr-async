@@ -4,7 +4,11 @@ use std::{
         VecDeque,
     },
     fmt::Debug,
-    ops::DerefMut,
+    ops::{
+        Bound,
+        DerefMut,
+        RangeBounds,
+    },
     sync::Arc,
     task::{
         Context,
@@ -25,7 +29,8 @@ use crate::SampleType;
 pub struct Buffer {
     #[debug(skip)]
     data: Arc<[u8]>,
-    pub filled: usize,
+    pub start: usize,
+    pub end: usize,
     pub sample_rate: u32,
     pub sample_type: SampleType,
 }
@@ -35,7 +40,8 @@ impl Buffer {
         let data = std::iter::repeat_n(0, capacity).collect();
         Self {
             data,
-            filled: 0,
+            start: 0,
+            end: 0,
             sample_rate: 0,
             sample_type: SampleType::Iq,
         }
@@ -53,7 +59,37 @@ impl Buffer {
     }
 
     pub fn filled(&self) -> &[u8] {
-        &self.data[..self.filled]
+        &self.data[self.start..self.end]
+    }
+
+    pub fn slice(&mut self, range: impl RangeBounds<usize>) {
+        let start = match range.start_bound().cloned() {
+            Bound::Included(start_bound) => self.start + start_bound,
+            Bound::Excluded(start_bound) => self.start + start_bound + 1,
+            Bound::Unbounded => self.start,
+        };
+        let end = match range.end_bound().cloned() {
+            Bound::Included(end_bound) => self.start + end_bound + 1,
+            Bound::Excluded(end_bound) => self.start + end_bound,
+            Bound::Unbounded => self.end,
+        };
+
+        assert!(start >= self.start, "slice start out of bounds");
+        assert!(start <= end, "slice start > end");
+        assert!(end <= self.end, "slice end out of bounds");
+
+        self.start = start;
+        self.end = end;
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
     }
 }
 
