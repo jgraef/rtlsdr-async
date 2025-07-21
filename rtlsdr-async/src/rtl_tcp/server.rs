@@ -100,6 +100,7 @@ impl RtlTcpServer<BackendHandler<RtlSdr>> {
 impl<H> RtlTcpServer<H>
 where
     H: Handler,
+    H::ConnectionHandler: Send + 'static,
 {
     /// Serve incoming connections
     pub async fn serve(mut self) -> Result<(), Error<H::Error>> {
@@ -140,7 +141,7 @@ where
             tokio::spawn(
                 async move {
                     tracing::debug!(%address, "new connection");
-                    if let Err(error) = handle_connection(connection, shutdown, handler).await {
+                    if let Err(error) = serve_connection(connection, shutdown, handler).await {
                         tracing::error!(?error);
                     }
                     tracing::debug!(%address, "closing connection");
@@ -222,8 +223,14 @@ impl SampleBuffer {
     }
 
     pub fn confirm_read(&mut self, num_bytes: usize) {
-        self.read_pos += num_bytes * std::mem::size_of::<Iq>();
+        assert_eq!(num_bytes % 2, 0, "todo: buffer half-read sample");
+        self.read_pos += num_bytes / 2;
         assert!(self.read_pos <= self.write_pos);
+
+        if self.read_pos == self.write_pos {
+            self.read_pos = 0;
+            self.write_pos = 0;
+        }
     }
 
     pub fn can_write(&self) -> bool {
@@ -246,7 +253,7 @@ impl Default for SampleBuffer {
     }
 }
 
-async fn handle_connection<H>(
+pub async fn serve_connection<H>(
     mut connection: TcpStream,
     shutdown: CancellationToken,
     mut handler: H,
@@ -275,7 +282,9 @@ where
                 }
             }
             result = forward_samples(&mut sample_buffer, &mut handler, &mut tcp_write) => {
-                result?;
+                if result? {
+                    break;
+                }
             }
         }
     }
@@ -328,8 +337,8 @@ pub trait Handler {
     ) -> impl Future<Output = Result<Option<Self::ConnectionHandler>, Self::Error>>;
 }
 
-pub trait ConnectionHandler: Send + 'static {
-    type Error: std::error::Error + Send;
+pub trait ConnectionHandler {
+    type Error: std::error::Error;
 
     fn dongle_info(&self) -> DongleInfo;
 
@@ -404,7 +413,18 @@ where
     }
 
     async fn handle_command(&mut self, command: Command) -> Result<(), Self::Error> {
-        command.apply(&self.backend).await
+        match command {
+            Command::SetDirectSampling { mode: _ } => {
+                // ignored
+            }
+            _ => {
+                if let Err(error) = command.apply(&self.backend).await {
+                    // log, but don't end connection
+                    tracing::error!(?error);
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn read_samples(&mut self, buffer: &mut [Iq]) -> Result<usize, Self::Error> {

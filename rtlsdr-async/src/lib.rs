@@ -371,7 +371,7 @@ impl<T> Chunk<T> {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.buffer.len()
+        self.buffer.len() / size_of::<T>()
     }
 
     #[inline]
